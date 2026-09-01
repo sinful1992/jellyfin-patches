@@ -1,0 +1,44 @@
+Read user data from the cache and database, not the item snapshot
+
+BaseItem.UserData is a snapshot taken when that instance was materialised.
+Instances outlive their entry in the library cache (an LRU of ProcessorCount*100
+== 800 entries here, against ~18k items) and SessionInfo.FullNowPlayingItem pins
+one for an entire playback session. Seeding the shared user-data cache from that
+snapshot makes a stale value authoritative, so a favourite set through a newer
+instance is reverted by the next progress report, which writes every column.
+
+This release already has a cache-first-then-database overload; the BaseItem
+overload simply was not using it.
+
+diff --git a/Emby.Server.Implementations/Library/UserDataManager.cs b/Emby.Server.Implementations/Library/UserDataManager.cs
+index 45a5e1ef94..8a6285d0a5 100644
+--- a/Emby.Server.Implementations/Library/UserDataManager.cs
++++ b/Emby.Server.Implementations/Library/UserDataManager.cs
+@@ -238,14 +238,19 @@ namespace Emby.Server.Implementations.Library
+         /// <inheritdoc />
+         public UserItemData GetUserData(User user, BaseItem item)
+         {
+-            var cacheKey = GetCacheKey(user.InternalId, item.Id);
+-            return _cache.GetOrAdd(
+-                cacheKey,
+-                (k, i) => i.UserData?.Where(e => e.UserId.Equals(user.Id)).Select(Map).FirstOrDefault() ?? new UserItemData()
+-                {
+-                    Key = i.GetUserDataKeys()[0],
+-                },
+-                item);
++            // Deliberately not seeded from item.UserData. That array is a snapshot taken when the
++            // BaseItem instance was materialised, and instances outlive their entry in the library
++            // cache -- SessionInfo.FullNowPlayingItem pins one for a whole playback session. Seeding
++            // the shared cache from a stale snapshot makes it authoritative for every later reader,
++            // so a favourite set through a newer instance is reverted by the next progress report,
++            // which writes every column back. The overload below is cache-first then database, which
++            // stays correct no matter which instance the caller happens to hold.
++            var keys = item.GetUserDataKeys();
++
++            return GetUserData(user, item.Id, keys) ?? new UserItemData()
++            {
++                Key = keys[0],
++            };
+         }
+ 
+         /// <inheritdoc />

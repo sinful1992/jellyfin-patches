@@ -1,0 +1,2 @@
+# the webhook lives outside the repo; this is public
+*.env
