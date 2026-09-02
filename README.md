@@ -12,7 +12,7 @@ instance. Two are fixed here. Upstream has not fixed any of them.
 
 | Patch | What it fixes | Status |
 |---|---|---|
-| `0001-require-auth-on-media-endpoints` | 11 media endpoints served with no authentication at all | applied, LAN-scoped |
+| `0001-require-auth-on-media-endpoints` | 11 media endpoints served with no authentication at all | applied, ticket-scoped |
 | `0002-userdata-no-stale-item-snapshot` | Favourites/played state reverted by playback progress reports | applied |
 | trickplay N+1 | A query per media source per item, plus a blocking wait, in every DTO | **not ported** |
 
@@ -38,7 +38,8 @@ fix was worse than the bug. See `notes/hls-seek.md`.
 `ApiServiceCollectionExtensions` configures only `DefaultPolicy`. There is no
 `FallbackPolicy` and no global `AuthorizeFilter`, so any action without an explicit
 `[Authorize]` is anonymous. Item ids are `MD5(type.FullName + path)`, so they are
-derived from the file path rather than being secret.
+derived from the file path rather than being secret -- verified by reproducing an id
+from a path alone and streaming it with no token.
 
 Against an unpatched server:
 
@@ -47,25 +48,54 @@ Against an unpatched server:
 
 That works for video items too, because `AudioController` does not type-check.
 
-### Why LAN-scoped, not a bare `[Authorize]`
+### Why not a bare `[Authorize]`
 
-The first revision used bare `[Authorize]` and **broke direct play**. Upstream leaves
-these routes anonymous deliberately -- `HlsSegmentController` carries a comment saying
-so -- because streaming clients cannot always attach credentials. Jellyfin Android TV
-0.19.10 requests `/Videos/{id}/stream?static=true` with no `api_key` and no auth
-header; under `[Authorize]` that 401s, the client reports "Player error encountered,
-will retry" and silently falls back to a server-side HLS remux on **every** playback.
+It breaks direct play. Jellyfin for Android TV 0.19.10 composes the stream URL itself
+and attaches no credential -- no `ApiKey`, no `api_key`, no `PlaySessionId`, no header.
+Under `[Authorize]` it 401s, reports "Player error encountered, will retry", and falls
+back to a server-side HLS remux on **every** playback. Upstream leaves these routes
+anonymous deliberately; `HlsSegmentController` carries a comment saying so.
 
-The patch now uses `Policies.AnonymousLanAccessPolicy`, which upstream already
-registers: anonymous requests from `NetworkConfiguration.LocalNetworkSubnets` pass,
-everything else 401s.
+This also rules out server-minted signed URLs, which was the most promising idea on
+paper: **this client does not use the URL the server hands it.** By contrast
+`DynamicHlsController` is `[Authorize]` at class level and works fine, because there
+the server writes the segment URLs -- token included -- into the playlist it returns.
 
-Stated honestly: every path that can currently reach this server (LAN, Docker bridge,
-Tailnet) is inside `LocalNetworkSubnets`, so **today this is equivalent in practice to
-stock behaviour**. Its value is defence in depth for the day Jellyfin sits behind a
-proxy, funnel or port-forward. It is not the blanket anonymous-access closure the
-first revision claimed -- that claim and working direct play are mutually exclusive on
-this client.
+### Why not `AnonymousLanAccessPolicy` either
+
+That was the previous revision, and it was inert. Every path that can reach this
+server (LAN, Docker bridge, Tailnet) is already inside `LocalNetworkSubnets`, so it
+refused nothing stock Jellyfin would have served, and its deny branch could not be
+exercised on this host at all: a container on a deliberately excluded bridge still
+arrives NATed as an address that *is* on the list.
+
+### What it does instead: playback tickets
+
+An authenticated playback negotiation grants access to the media it just handed out.
+
+`MediaInfoController` is `[Authorize]`, so every `PlaybackInfo` call has a user behind
+it. `MediaInfoHelper.GetPlaybackInfo` issues a ticket keyed on the caller's normalized
+remote address, covering the item id and every media source id in the response.
+`StreamAccessHandler` redeems it for anonymous requests and slides the expiry on each
+use, so a long or paused playback does not expire mid-stream. Tickets live 4 hours, in
+memory only. Authenticated callers pass as before.
+
+So a caller that never authenticated gets nothing, **on any subnet**. Guessing a file
+path is no longer enough, which is the actual defect.
+
+Residual, stated plainly: a ticket is bound to an address, so anything sharing that
+address -- another process on the same host, or a second device behind the same NAT --
+could ride a ticket while a real playback is live. That is strictly narrower than
+"anyone who can reach the port, at any time, for any item".
+
+The two Live TV routes keep `AnonymousLanAccessPolicy`: they are keyed by a
+server-generated recording/stream id rather than an item id, so no ticket covers them,
+and unlike item ids those are not derived from a file path.
+
+Unit tests in `tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/` cover the deny branch
+the LAN policy could not: anonymous with no ticket is refused, a ticket does not travel
+to another address or cover another item, a query-string media source id is honoured,
+and an authenticated caller needs no ticket.
 
 ## Building
 

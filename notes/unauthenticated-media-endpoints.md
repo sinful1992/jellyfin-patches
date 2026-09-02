@@ -1,5 +1,15 @@
 # Jellyfin: media streaming endpoints served without authentication
 
+> **STATUS 2026-09-02 (later the same day): resolved locally, brief kept for the record.**
+> The open question -- "do all clients use the URL the server returns?" -- is answered:
+> **no.** Jellyfin for Android TV 0.19.10 composes the direct play URL itself, so the
+> signed-URL idea below would not have fixed it. `DynamicHlsController` works under a
+> plain `[Authorize]` precisely because there the server writes the segment URLs into
+> the playlist. The shipped fix binds streaming access to an *authenticated PlaybackInfo
+> negotiation* instead (question 2's direction, keyed on remote address rather than
+> `PlaySessionId`, which this client does not send). See `../README.md` and
+> `../patches/0001-require-auth-on-media-endpoints.patch`.
+
 A self-contained brief. Everything below was verified against a live Jellyfin
 10.11.11 server on 2026-09-02; nothing is quoted from memory or documentation.
 
