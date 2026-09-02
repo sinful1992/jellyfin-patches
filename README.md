@@ -97,6 +97,26 @@ the LAN policy could not: anonymous with no ticket is refused, a ticket does not
 to another address or cover another item, a query-string media source id is honoured,
 and an authenticated caller needs no ticket.
 
+### Verified end to end, 2026-09-02
+
+On a throwaway instance of this exact image, from a peer container with its own address
+(`172.17.0.3`, no NAT collapsing it onto the host), sending the URL shape Android TV
+actually sends and no credential of any kind:
+
+| Step | Result |
+|---|---|
+| bare `GET /Videos/{id}/stream?...` before negotiating | `401` |
+| authenticated `POST /Items/{id}/PlaybackInfo` | `200` |
+| the *identical* bare request, still no credentials | `200`, full media body |
+| bare request for an unrelated item id | `401` |
+
+So the deny branch that could not be constructed under the LAN policy is now
+exercisable on real infrastructure, and direct play survives.
+
+On production, all nine patched routes answer `401` unauthenticated, `/health` and
+`/System/Info/Public` still answer `200`, and Intro Skipper 1.10.11.23 loads against
+the pinned ABI.
+
 ## Building
 
 Needs the **.NET 9** SDK (10.11.x pins `rollForward: latestMinor`, so a 10.x SDK
