@@ -23,6 +23,11 @@ on a release branch. It stays on the `perf/trickplay-batch` branch of
 `jellyfin-server-fixes` for whenever the base moves to a release that has the
 batching.
 
+The four upstream issues behind patch 0001 (#13983-#13986) were filed by
+`felix920506` on 2025-04-23 — not by us — and all four are still open sixteen
+months later. A standalone brief on that defect, written up for a second opinion,
+is in `notes/unauthenticated-media-endpoints.md`.
+
 A fourth patch — bounding the HLS remux seek offset — was written, then **disproved
 by measurement** and dropped. The underlying defect is real (the hard-coded 0.5s
 offset makes 11 of 15 segments start late, losing up to 0.334s of content) but the
