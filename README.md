@@ -12,7 +12,7 @@ instance. Two are fixed here. Upstream has not fixed any of them.
 
 | Patch | What it fixes | Status |
 |---|---|---|
-| `0001-require-auth-on-media-endpoints` | 11 media endpoints served with no authentication at all | applied |
+| `0001-require-auth-on-media-endpoints` | 11 media endpoints served with no authentication at all | applied, LAN-scoped |
 | `0002-userdata-no-stale-item-snapshot` | Favourites/played state reverted by playback progress reports | applied |
 | trickplay N+1 | A query per media source per item, plus a blocking wait, in every DTO | **not ported** |
 
@@ -42,6 +42,26 @@ Against an unpatched server:
 
 That works for video items too, because `AudioController` does not type-check.
 
+### Why LAN-scoped, not a bare `[Authorize]`
+
+The first revision used bare `[Authorize]` and **broke direct play**. Upstream leaves
+these routes anonymous deliberately -- `HlsSegmentController` carries a comment saying
+so -- because streaming clients cannot always attach credentials. Jellyfin Android TV
+0.19.10 requests `/Videos/{id}/stream?static=true` with no `api_key` and no auth
+header; under `[Authorize]` that 401s, the client reports "Player error encountered,
+will retry" and silently falls back to a server-side HLS remux on **every** playback.
+
+The patch now uses `Policies.AnonymousLanAccessPolicy`, which upstream already
+registers: anonymous requests from `NetworkConfiguration.LocalNetworkSubnets` pass,
+everything else 401s.
+
+Stated honestly: every path that can currently reach this server (LAN, Docker bridge,
+Tailnet) is inside `LocalNetworkSubnets`, so **today this is equivalent in practice to
+stock behaviour**. Its value is defence in depth for the day Jellyfin sits behind a
+proxy, funnel or port-forward. It is not the blanket anonymous-access closure the
+first revision claimed -- that claim and working direct play are mutually exclusive on
+this client.
+
 ## Building
 
 Needs the **.NET 9** SDK (10.11.x pins `rollForward: latestMinor`, so a 10.x SDK
@@ -68,11 +88,23 @@ decision, not an automatic action.
 It reports:
 
 - a new Jellyfin release (time to consider moving the base tag)
-- upstream commits touching any file our patches touch (a rebase will conflict, or
-  upstream fixed it and a patch can be dropped)
+- **whether the patch set still applies to that release** -- it fetches the new tag
+  into a throwaway worktree and runs `git apply --check` on each patch, so the release
+  notice arrives with a verdict ("applies cleanly" / "conflicts, here is the first
+  reject") rather than a chore. `$SRC_DIR` is never disturbed; it holds work in
+  progress.
+- upstream commits touching any file our patches touch, on **both `master` and
+  `release-10.11.z`** (a rebase will conflict, or upstream fixed it and a patch can be
+  dropped). The release branch matters most: a 10.11.z security backport lands there,
+  and the GitHub commits API only looks at the default branch unless told otherwise.
 - any of the six tracked issues closing upstream (our patch may be redundant)
 - Intro Skipper releases (it is what pins the base version, so its support for a
   newer server is what opens the upgrade path)
+- **local drift** -- that `jellyfin-patched` still exists and is what the `jellyfin`
+  container is actually running. The image is built locally and exists in no registry,
+  so `docker image prune -a` or a stray `compose pull` can put the stock image back
+  silently. A watcher reporting diligently on upstream while the local build has
+  evaporated is exactly the dead-end cascade this setup exists to avoid.
 
 It uses the **anonymous** GitHub API deliberately: no token to leak from a public
 repo, and it is unaffected by an account-level block on the jellyfin org.

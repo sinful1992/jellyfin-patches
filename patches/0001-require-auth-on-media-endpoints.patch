@@ -1,4 +1,4 @@
-Require authentication on media streaming endpoints
+Require LAN-scoped authorization on media streaming endpoints
 
 Only DefaultPolicy is configured in ApiServiceCollectionExtensions -- there is no
 FallbackPolicy and no global AuthorizeFilter -- so an action without an explicit
@@ -10,11 +10,44 @@ MD5(type.FullName + path), so a guessable path yields a downloadable stream.
 Verified against this server: GET /Items/{id} returns 401 while
 GET /Audio/{id}/stream?static=true returns 206 with the media body, no token.
 
+Why the built-in AnonymousLanAccessPolicy and not a bare [Authorize]:
+
+An earlier revision of this patch used [Authorize]. That broke direct play. Upstream
+leaves these routes anonymous ON PURPOSE -- HlsSegmentController even says so in a
+comment ("requests come from Chrome without full query string") -- because streaming
+clients cannot always attach credentials. Measured on 2026-09-02: Jellyfin Android TV
+0.19.10 requests
+
+    GET /Videos/{id}/stream?container=mkv&static=true&...
+
+with no api_key parameter and no auth header. Under [Authorize] that 401s, the client
+reports "Player error encountered, will retry", re-POSTs PlaybackInfo and falls back to
+/videos/{id}/hls1/main/*.ts -- so playback silently drops off direct play onto a
+server-side remux on every single start. The same URL returns 206 when api_key or
+X-Emby-Token is supplied, so the endpoint is fine; the client simply sends neither.
+
+Policies.AnonymousLanAccessPolicy (already registered upstream in
+ApiServiceCollectionExtensions, handler AnonymousLanAccessHandler) permits anonymous
+requests whose remote IP is in NetworkConfiguration.LocalNetworkSubnets and 401s the
+rest. On this server that list is 192.168.1.0/24, 172.19.0.0/16 and 100.64.0.0/10, so
+LAN clients, the Docker bridge and Tailscale peers all keep direct play, while any
+genuinely off-network origin is refused.
+
+Scope, stated honestly: every path that can currently reach this server is inside
+LocalNetworkSubnets (Jellyfin is not in `tailscale serve` and is not funnelled), so
+today this is equivalent in practice to stock behaviour. Its value is defence in depth
+-- if Jellyfin is ever put behind a reverse proxy, funnel or port-forward, anonymous
+streaming is already refused rather than needing to be remembered at that moment.
+
 diff --git a/Jellyfin.Api/Controllers/AudioController.cs b/Jellyfin.Api/Controllers/AudioController.cs
-index 552030e9e3..1372ea95fa 100644
+index 552030e9e3..599fa3a53b 100644
 --- a/Jellyfin.Api/Controllers/AudioController.cs
 +++ b/Jellyfin.Api/Controllers/AudioController.cs
-@@ -8,6 +8,7 @@ using Jellyfin.Api.Models.StreamingDtos;
+@@ -5,9 +5,11 @@ using System.Threading.Tasks;
+ using Jellyfin.Api.Attributes;
+ using Jellyfin.Api.Helpers;
+ using Jellyfin.Api.Models.StreamingDtos;
++using MediaBrowser.Common.Api;
  using MediaBrowser.Controller.MediaEncoding;
  using MediaBrowser.Controller.Streaming;
  using MediaBrowser.Model.Dlna;
@@ -22,55 +55,63 @@ index 552030e9e3..1372ea95fa 100644
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  
-@@ -86,6 +87,7 @@ public class AudioController : BaseJellyfinApiController
+@@ -86,6 +88,7 @@ public class AudioController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Audio stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("{itemId}/stream", Name = "GetAudioStream")]
      [HttpHead("{itemId}/stream", Name = "HeadAudioStream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
-@@ -253,6 +255,7 @@ public class AudioController : BaseJellyfinApiController
+@@ -253,6 +256,7 @@ public class AudioController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Audio stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("{itemId}/stream.{container}", Name = "GetAudioStreamByContainer")]
      [HttpHead("{itemId}/stream.{container}", Name = "HeadAudioStreamByContainer")]
      [ProducesResponseType(StatusCodes.Status200OK)]
 diff --git a/Jellyfin.Api/Controllers/HlsSegmentController.cs b/Jellyfin.Api/Controllers/HlsSegmentController.cs
-index 1927a332b2..4e52d6e850 100644
+index 1927a332b2..c3dd941556 100644
 --- a/Jellyfin.Api/Controllers/HlsSegmentController.cs
 +++ b/Jellyfin.Api/Controllers/HlsSegmentController.cs
-@@ -49,8 +49,7 @@ public class HlsSegmentController : BaseJellyfinApiController
+@@ -5,6 +5,7 @@ using System.IO;
+ using System.Threading.Tasks;
+ using Jellyfin.Api.Attributes;
+ using Jellyfin.Api.Helpers;
++using MediaBrowser.Common.Api;
+ using MediaBrowser.Common.Configuration;
+ using MediaBrowser.Controller.Configuration;
+ using MediaBrowser.Controller.MediaEncoding;
+@@ -49,8 +50,7 @@ public class HlsSegmentController : BaseJellyfinApiController
      /// <param name="segmentId">The segment id.</param>
      /// <response code="200">Hls audio segment returned.</response>
      /// <returns>A <see cref="FileStreamResult"/> containing the audio stream.</returns>
 -    // Can't require authentication just yet due to seeing some requests come from Chrome without full query string
 -    // [Authenticated]
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("Audio/{itemId}/hls/{segmentId}/stream.mp3", Name = "GetHlsAudioSegmentLegacyMp3")]
      [HttpGet("Audio/{itemId}/hls/{segmentId}/stream.aac", Name = "GetHlsAudioSegmentLegacyAac")]
      [ProducesResponseType(StatusCodes.Status200OK)]
-@@ -126,8 +125,7 @@ public class HlsSegmentController : BaseJellyfinApiController
+@@ -126,8 +126,7 @@ public class HlsSegmentController : BaseJellyfinApiController
      /// <response code="200">Hls video segment returned.</response>
      /// <response code="404">Hls segment not found.</response>
      /// <returns>A <see cref="FileStreamResult"/> containing the video segment.</returns>
 -    // Can't require authentication just yet due to seeing some requests come from Chrome without full query string
 -    // [Authenticated]
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("Videos/{itemId}/hls/{playlistId}/{segmentId}.{segmentContainer}")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
 diff --git a/Jellyfin.Api/Controllers/LiveTvController.cs b/Jellyfin.Api/Controllers/LiveTvController.cs
-index 77e3e301a6..56cb6c377a 100644
+index 77e3e301a6..f2a4a3f2e6 100644
 --- a/Jellyfin.Api/Controllers/LiveTvController.cs
 +++ b/Jellyfin.Api/Controllers/LiveTvController.cs
 @@ -1159,6 +1159,7 @@ public class LiveTvController : BaseJellyfinApiController
      /// An <see cref="OkResult"/> containing the recording stream on success,
      /// or a <see cref="NotFoundResult"/> if recording not found.
      /// </returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("LiveRecordings/{recordingId}/stream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -78,19 +119,19 @@ index 77e3e301a6..56cb6c377a 100644
      /// An <see cref="OkResult"/> containing the channel stream on success,
      /// or a <see cref="NotFoundResult"/> if stream not found.
      /// </returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("LiveStreamFiles/{streamId}/stream.{container}")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
 diff --git a/Jellyfin.Api/Controllers/SubtitleController.cs b/Jellyfin.Api/Controllers/SubtitleController.cs
-index e5df873f5b..6d6000f0ea 100644
+index e5df873f5b..80c38fd63c 100644
 --- a/Jellyfin.Api/Controllers/SubtitleController.cs
 +++ b/Jellyfin.Api/Controllers/SubtitleController.cs
 @@ -205,6 +205,7 @@ public class SubtitleController : BaseJellyfinApiController
      /// <param name="startPositionTicks">The start position of the subtitle in ticks.</param>
      /// <response code="200">File returned.</response>
      /// <returns>A <see cref="FileContentResult"/> with the subtitle file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/Stream.{routeFormat}")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesFile("text/*")]
@@ -98,15 +139,20 @@ index e5df873f5b..6d6000f0ea 100644
      /// <param name="addVttTimeMap">Optional. Whether to add a VTT time map.</param>
      /// <response code="200">File returned.</response>
      /// <returns>A <see cref="FileContentResult"/> with the subtitle file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeStartPositionTicks}/Stream.{routeFormat}")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesFile("text/*")]
 diff --git a/Jellyfin.Api/Controllers/VideoAttachmentsController.cs b/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
-index b67c6fdb7b..71c8b1196e 100644
+index b67c6fdb7b..9fce01e2bb 100644
 --- a/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
 +++ b/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
-@@ -10,6 +10,7 @@ using MediaBrowser.Common.Extensions;
+@@ -6,10 +6,12 @@ using System.Threading.Tasks;
+ using Jellyfin.Api.Attributes;
+ using Jellyfin.Api.Extensions;
+ using Jellyfin.Api.Helpers;
++using MediaBrowser.Common.Api;
+ using MediaBrowser.Common.Extensions;
  using MediaBrowser.Controller.Entities;
  using MediaBrowser.Controller.Library;
  using MediaBrowser.Controller.MediaEncoding;
@@ -114,23 +160,23 @@ index b67c6fdb7b..71c8b1196e 100644
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  
-@@ -46,6 +47,7 @@ public class VideoAttachmentsController : BaseJellyfinApiController
+@@ -46,6 +48,7 @@ public class VideoAttachmentsController : BaseJellyfinApiController
      /// <response code="200">Attachment retrieved.</response>
      /// <response code="404">Video or attachment not found.</response>
      /// <returns>An <see cref="FileStreamResult"/> containing the attachment stream on success, or a <see cref="NotFoundResult"/> if the attachment could not be found.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("{videoId}/{mediaSourceId}/Attachments/{index}")]
      [ProducesFile(MediaTypeNames.Application.Octet)]
      [ProducesResponseType(StatusCodes.Status200OK)]
 diff --git a/Jellyfin.Api/Controllers/VideosController.cs b/Jellyfin.Api/Controllers/VideosController.cs
-index 447f71bd96..65cc7972bd 100644
+index 447f71bd96..c396595179 100644
 --- a/Jellyfin.Api/Controllers/VideosController.cs
 +++ b/Jellyfin.Api/Controllers/VideosController.cs
 @@ -309,6 +309,7 @@ public class VideosController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Video stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("{itemId}/stream")]
      [HttpHead("{itemId}/stream", Name = "HeadVideoStream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
@@ -138,7 +184,7 @@ index 447f71bd96..65cc7972bd 100644
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Video stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
-+    [Authorize]
++    [Authorize(Policy = Policies.AnonymousLanAccessPolicy)]
      [HttpGet("{itemId}/stream.{container}")]
      [HttpHead("{itemId}/stream.{container}", Name = "HeadVideoStreamByContainer")]
      [ProducesResponseType(StatusCodes.Status200OK)]
