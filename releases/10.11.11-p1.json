@@ -1,0 +1,54 @@
+{
+  "version": "10.11.11-p1",
+  "released": "2026-09-06",
+  "base_tag": "v10.11.11",
+  "base_image": "lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls43@sha256:b8dcc7b71d0ea872b74314da4b995c0cf282b1778438c295996e7be88c70fdda",
+  "image": "jellyfin-patched:10.11.11-p1",
+  "series_branch": "patched/10.11.11",
+  "series": [
+    {
+      "sha": "d942e74cdba65be04ce80e54bacbb85d0dd252cc",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "dcc38a19d7198180e2b3a3eba4ed270343eaa9ca",
+      "backport_of": null
+    },
+    {
+      "sha": "8873675ac14a859cf77cd2347750e4644ba32c99",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "93c6d5e6ab6471bfe5c916b1fe65524950bb9390",
+      "backport_of": null
+    },
+    {
+      "sha": "a121683ba1259025c6cda6233d00611ffa0640de",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "8f59827fd55010abf8d497de7b2a6f913992445a",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    },
+    {
+      "sha": "f36df621dcfc4ca196acb5355a13f87fd1f88036",
+      "subject": "Read user data from the cache and database, never the item snapshot",
+      "patch_id": "45683df817bd5c9405ad66d9d7564dc354156814",
+      "backport_of": null
+    },
+    {
+      "sha": "122f0e2490b1e75b2400c59f034f8dfe57ece119",
+      "subject": "Backport: fix PGS subtitles for BDMV with TrueHD",
+      "patch_id": "939c566f38dae584acfb4401a3771bc35dccbf74",
+      "backport_of": "7c463f5fba1d1aefa7505144a22b6526de540319"
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll",
+    "MediaBrowser.Controller.dll",
+    "MediaBrowser.MediaEncoding.dll"
+  ],
+  "tooling": [],
+  "repo_commit": "565a5453c69a4bfd4981c672c5077347c2b69685"
+}
