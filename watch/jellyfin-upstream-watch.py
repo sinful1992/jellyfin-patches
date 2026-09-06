@@ -44,8 +44,24 @@ def _fork_version():
         return None
 
 
-OUT_IMAGE = os.environ.get("JF_OUT_IMAGE") or (
-    f"jellyfin-patched:{_fork_version()}" if _fork_version() else "jellyfin-patched:10.11.11")
+GHCR_OWNER = os.environ.get("GHCR_OWNER", "sinful1992")
+
+
+def _expected_images():
+    """Both names are legitimate for the same release.
+
+    build.sh tags locally as jellyfin-patched:<version>; the Actions workflow
+    publishes ghcr.io/<owner>/jellyfin-patched:<version>. They are built separately
+    so they are not bit-identical (.NET embeds a fresh MVID per build), but both
+    pass the same gates and smoke test, and either may legitimately be deployed.
+    """
+    v = _fork_version()
+    if not v:
+        return ["jellyfin-patched:10.11.11"]
+    return [f"jellyfin-patched:{v}", f"ghcr.io/{GHCR_OWNER}/jellyfin-patched:{v}"]
+
+
+OUT_IMAGE = os.environ.get("JF_OUT_IMAGE") or _expected_images()[0]
 SERIES = os.environ.get("JF_SERIES", "patched/10.11.11")
 PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patches/tools/port-check.py"))
 
@@ -253,8 +269,9 @@ def check_deployment(state, findings):
         problems.append("container `jellyfin` not found")
     else:
         running = r.stdout.strip()
-        if running != OUT_IMAGE:
-            if running.startswith("jellyfin-patched:"):
+        expected = [OUT_IMAGE] if os.environ.get("JF_OUT_IMAGE") else _expected_images()
+        if running not in expected:
+            if "jellyfin-patched:" in running:
                 problems.append(
                     f"container `jellyfin` is running `{running}`, but the repo is at "
                     f"`{OUT_IMAGE}` -- an older release of ours is live. Deploy by editing "
