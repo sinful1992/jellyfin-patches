@@ -9,8 +9,21 @@ REPO_DIR="${REPO_DIR:-$HOME/jellyfin-patches}"
 STAGE=""
 SRC_DIR="${SRC_DIR:-$HOME/src/jellyfin}"
 BASE_TAG="${BASE_TAG:-v10.11.11}"
-BASE_IMAGE="${BASE_IMAGE:-lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls43}"
-OUT_IMAGE="${OUT_IMAGE:-jellyfin-patched:10.11.11}"
+
+# One source of truth for both, read by build.sh, tools/release.sh and the watcher.
+#
+# BASE_IMAGE is pinned by DIGEST as well as tag: the lsio tag is mutable, and the
+# whole ABI story rests on the assembly versions that one specific image ships. A
+# rebuild that silently landed on a re-pushed tag could pass the version gate against
+# a different dependency graph than the one that was tested.
+BASE_IMAGE="${BASE_IMAGE:-$(cat "$REPO_DIR/BASE_IMAGE")}"
+
+# Image tags are IMMUTABLE per release: jellyfin-patched:10.11.11-p1, never a moving
+# :10.11.11. A moving tag means a restart silently adopts whatever was last built --
+# which is exactly what happened here: the container ran a tag rebuilt underneath it.
+# Deployment is therefore an explicit compose edit, not a side effect of building.
+FORK_VERSION="${FORK_VERSION:-$(cat "$REPO_DIR/VERSION")}"
+OUT_IMAGE="${OUT_IMAGE:-jellyfin-patched:${FORK_VERSION}}"
 DOTNET="${DOTNET:-$HOME/.dotnet/dotnet}"
 
 # ASSEMBLIES is DERIVED from what the patch set actually touches -- see "deriving the
@@ -192,5 +205,7 @@ say "done"
 echo "Built ${OUT_IMAGE} from ${BASE_TAG} + $(ls -1 "$REPO_DIR"/patches/*.patch 2>/dev/null | wc -l) patch(es),"
 echo "replacing: ${ASSEMBLIES[*]}"
 echo "Smoke test passed: unauthenticated media endpoints are rejected."
-echo "It is NOT running yet. To switch, point the jellyfin service at ${OUT_IMAGE}."
-echo "To roll back, point it back at ${BASE_IMAGE}."
+echo "It is NOT running yet, and nothing adopts it implicitly -- the tag is immutable."
+echo "To deploy: set  image: ${OUT_IMAGE}  in ~/media/docker-compose.yml, then"
+echo "  docker compose -f ~/media/docker-compose.yml up -d --no-deps jellyfin"
+echo "To roll back: point it at the previous jellyfin-patched:* tag (docker images | grep jellyfin-patched)."

@@ -31,7 +31,21 @@ WATCHED_BRANCHES = ["master", "release-10.11.z"]
 # The patches, in the order build.sh applies them.
 PATCH_DIR = Path(os.environ.get("JF_PATCH_DIR", Path.home() / "jellyfin-patches/patches"))
 SRC_DIR = Path(os.environ.get("JF_SRC_DIR", Path.home() / "src/jellyfin"))
-OUT_IMAGE = os.environ.get("JF_OUT_IMAGE", "jellyfin-patched:10.11.11")
+# Read from the repo's VERSION file, never hardcoded: image tags are immutable per
+# release (jellyfin-patched:10.11.11-p1), so a hardcoded tag would either false-alarm
+# after every release or, if set to something moving, stop detecting a stock revert.
+REPO_ROOT = Path(os.environ.get("JF_REPO_DIR", Path.home() / "jellyfin-patches"))
+
+
+def _fork_version():
+    try:
+        return (REPO_ROOT / "VERSION").read_text().strip()
+    except OSError:
+        return None
+
+
+OUT_IMAGE = os.environ.get("JF_OUT_IMAGE") or (
+    f"jellyfin-patched:{_fork_version()}" if _fork_version() else "jellyfin-patched:10.11.11")
 SERIES = os.environ.get("JF_SERIES", "patched/10.11.11")
 PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patches/tools/port-check.py"))
 
@@ -237,8 +251,18 @@ def check_deployment(state, findings):
     r = _run(["docker", "inspect", "--format", "{{.Config.Image}}", "jellyfin"], timeout=60)
     if r.returncode != 0:
         problems.append("container `jellyfin` not found")
-    elif r.stdout.strip() != OUT_IMAGE:
-        problems.append(f"container `jellyfin` is running `{r.stdout.strip()}`, not `{OUT_IMAGE}` -- patches are NOT live")
+    else:
+        running = r.stdout.strip()
+        if running != OUT_IMAGE:
+            if running.startswith("jellyfin-patched:"):
+                problems.append(
+                    f"container `jellyfin` is running `{running}`, but the repo is at "
+                    f"`{OUT_IMAGE}` -- an older release of ours is live. Deploy by editing "
+                    f"`image:` in ~/media/docker-compose.yml, or roll VERSION back.")
+            else:
+                problems.append(
+                    f"container `jellyfin` is running `{running}`, not `{OUT_IMAGE}` -- "
+                    f"patches are NOT live")
 
     key = "|".join(problems)
     if key != state.get("last_deploy_state", ""):
