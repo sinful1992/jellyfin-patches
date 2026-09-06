@@ -20,14 +20,39 @@ PUBLIC="${GHCR_PUBLIC:-1}"
 docker image inspect "$LOCAL" >/dev/null 2>&1 \
   || { echo "no local image $LOCAL -- build it first (build/build.sh)"; exit 1; }
 
-if ! gh auth status 2>&1 | grep -q "write:packages"; then
-  echo "gh token lacks write:packages. Run this, then re-run me:"
-  echo "    gh auth refresh -s write:packages,read:packages"
+# Credential, in order of preference:
+#   1. $GHCR_TOKEN
+#   2. ~/.config/ghcr-token   (chmod 600; a classic PAT with write:packages)
+#   3. the gh token, if it happens to carry write:packages
+# The gh route needs `gh auth refresh --hostname github.com -s write:packages,read:packages`,
+# which is a device-code flow and wants a real terminal. A PAT avoids that entirely.
+TOKEN_FILE="${GHCR_TOKEN_FILE:-$HOME/.config/ghcr-token}"
+if [ -n "${GHCR_TOKEN:-}" ]; then
+  TOKEN="$GHCR_TOKEN"; SOURCE="\$GHCR_TOKEN"
+elif [ -r "$TOKEN_FILE" ]; then
+  TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"; SOURCE="$TOKEN_FILE"
+elif gh auth status 2>&1 | grep -q "write:packages"; then
+  TOKEN="$(gh auth token)"; SOURCE="gh token"
+else
+  cat <<'MSG'
+No credential with write:packages. Either:
+
+  1. Create a classic PAT with the write:packages scope at
+       https://github.com/settings/tokens/new?scopes=write:packages,read:packages
+     then:
+       install -m600 /dev/null ~/.config/ghcr-token
+       printf '%s' '<the token>' > ~/.config/ghcr-token
+
+  2. Or grant the scope to gh, in a real terminal:
+       gh auth refresh --hostname github.com -s write:packages,read:packages
+
+Then re-run: tools/push-image.sh
+MSG
   exit 1
 fi
 
-echo "=== logging in to ghcr.io as ${OWNER} ==="
-gh auth token | docker login ghcr.io -u "$OWNER" --password-stdin
+echo "=== logging in to ghcr.io as ${OWNER} (credential: ${SOURCE}) ==="
+printf '%s' "$TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
 
 echo "=== pushing ${REMOTE} ==="
 docker tag "$LOCAL" "$REMOTE"
