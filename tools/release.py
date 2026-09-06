@@ -130,7 +130,8 @@ def changelog_entry(man, prev):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version")
-    ap.add_argument("--publish", action="store_true", help="push the tag and create the GitHub release")
+    ap.add_argument("--publish", action="store_true",
+                    help="push the tag, create the GitHub release, and push the image to GHCR")
     ap.add_argument("--skip-build", action="store_true", help="manifest/changelog only (for testing)")
     a = ap.parse_args()
 
@@ -214,6 +215,12 @@ def main():
             "--notes-file", str(notes), *assets, capture=False)
         notes.unlink(missing_ok=True)
         print(f"published: https://github.com/sinful1992/jellyfin-patches/releases/tag/v{version}")
+
+        # The image copy is what makes recovery a pull instead of a rebuild. A failure
+        # here must not undo a release that is already tagged and published.
+        r = subprocess.run([str(REPO / "tools/push-image.sh"), version], cwd=REPO)
+        if r.returncode != 0:
+            print("WARNING: image not pushed to GHCR -- the release itself is published.")
     else:
         print("\nNot pushed. To publish:")
         print(f"  tools/release.py --version {version} --publish   (re-runs) "
