@@ -194,7 +194,13 @@ def main():
     body = old[len(header):] if old.startswith(header) else old.split("\n\n", 1)[-1]
     CHANGELOG.write_text(header + entry + "\n" + body.lstrip("\n"))
 
-    git("add", "VERSION", "CHANGELOG.md", "releases", "patches")
+    # Everything, not just the release files: a change to build/ or tools/ is part of
+    # what this release IS. Committing a subset would tag a tree that was never built.
+    staged = git("status", "--porcelain")
+    if staged:
+        print("\nreleasing with these repo changes:")
+        print("\n".join("  " + l for l in staged.splitlines()))
+    git("add", "-A")
     git("commit", "-q", "-m", f"Release {version}\n\n" + entry.split("\n\n", 1)[-1][:1200])
     git("tag", "-a", f"v{version}", "-m", f"Release {version}")
     print(f"\n=== prepared release v{version} ===")
