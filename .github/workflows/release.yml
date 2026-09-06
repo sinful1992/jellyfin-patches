@@ -1,0 +1,66 @@
+name: Build and publish image
+
+# Pushing a release tag builds the image on GitHub and publishes it to GHCR with
+# GITHUB_TOKEN. That is what makes the package inherit this repository: an
+# Actions-published package is linked to the repo and takes its visibility, so a
+# public repo means a public package with no manual step. A package pushed by hand
+# with a PAT is account-scoped instead, permanently unlinked and private by default
+# -- which is the hole this closes.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Fork version to build (default: the VERSION file)'
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Resolve version and base tag
+        id: v
+        run: |
+          VERSION="${{ inputs.version }}"
+          [ -n "$VERSION" ] || VERSION="$(cat VERSION)"
+          echo "version=$VERSION"            >> "$GITHUB_OUTPUT"
+          echo "base_tag=v${VERSION%%-p*}"   >> "$GITHUB_OUTPUT"
+
+      - name: Check out upstream Jellyfin at the base tag
+        run: |
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/jellyfin/jellyfin.git "$RUNNER_TEMP/jellyfin"
+          git -C "$RUNNER_TEMP/jellyfin" fetch --depth 1 origin \
+            "refs/tags/${{ steps.v.outputs.base_tag }}:refs/tags/${{ steps.v.outputs.base_tag }}"
+          git -C "$RUNNER_TEMP/jellyfin" checkout -q "${{ steps.v.outputs.base_tag }}"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build through the gates and smoke test
+        env:
+          REPO_DIR: ${{ github.workspace }}
+          SRC_DIR: ${{ runner.temp }}/jellyfin
+          DOTNET: dotnet
+          BASE_TAG: ${{ steps.v.outputs.base_tag }}
+          OUT_IMAGE: ghcr.io/${{ github.repository_owner }}/jellyfin-patched:${{ steps.v.outputs.version }}
+        run: ./build/build.sh
+
+      - name: Publish
+        env:
+          OUT_IMAGE: ghcr.io/${{ github.repository_owner }}/jellyfin-patched:${{ steps.v.outputs.version }}
+        run: |
+          docker push "$OUT_IMAGE"
+          echo "published $OUT_IMAGE" >> "$GITHUB_STEP_SUMMARY"

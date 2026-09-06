@@ -222,11 +222,12 @@ def main():
         notes.unlink(missing_ok=True)
         print(f"published: https://github.com/sinful1992/jellyfin-patches/releases/tag/v{version}")
 
-        # The image copy is what makes recovery a pull instead of a rebuild. A failure
-        # here must not undo a release that is already tagged and published.
-        r = subprocess.run([str(REPO / "tools/push-image.sh"), version], cwd=REPO)
-        if r.returncode != 0:
-            print("WARNING: image not pushed to GHCR -- the release itself is published.")
+        # The image is published by .github/workflows/release.yml, which the tag push
+        # above triggers. Doing it from here with a PAT is what left the package
+        # account-scoped, unlinked and private; GITHUB_TOKEN in Actions publishes a
+        # package that belongs to the repo and inherits its visibility.
+        print("image build + publish runs in Actions (triggered by the tag):")
+        print("  gh run watch  |  gh run list --workflow=release.yml")
     else:
         print("\nNot pushed. To publish:")
         print(f"  tools/release.py --version {version} --publish   (re-runs) "
