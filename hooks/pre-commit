@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Refuse a commit that changes what ships without bumping VERSION and logging it.
+#
+# Same rule as the other machine: a fix means a version increase and a changelog
+# entry, enforced before the commit rather than remembered afterwards. Here that
+# matters more than usual, because the artifact is an immutable image tag -- an
+# unbumped VERSION means two different builds claiming to be the same release, and
+# rollback stops meaning anything.
+#
+# Content commits (patches/, build/, BASE_IMAGE) must satisfy both:
+#   1. VERSION has no release tag yet -- i.e. it was bumped since the last release
+#   2. CHANGELOG.md carries a heading for that VERSION
+# Docs and tooling commits are exempt.
+#
+# tools/release.py writes both, so a normal release passes this untouched.
+# Escape hatch: git commit --no-verify   (or ALLOW_UNVERSIONED=1)
+set -euo pipefail
+
+[ "${ALLOW_UNVERSIONED:-0}" = "1" ] && exit 0
+
+staged="$(git diff --cached --name-only)"
+ships="$(echo "$staged" | grep -E '^(patches/|build/|BASE_IMAGE$)' || true)"
+[ -z "$ships" ] && exit 0
+
+version="$(git show :VERSION 2>/dev/null | tr -d '[:space:]' || cat VERSION | tr -d '[:space:]')"
+[ -n "$version" ] || { echo "pre-commit: VERSION is empty"; exit 1; }
+
+fail() { echo; echo "pre-commit REFUSED: $*"; echo; exit 1; }
+
+if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+  fail "VERSION is ${version}, which is already released (tag v${version} exists).
+  This commit changes what ships:
+$(echo "$ships" | sed 's/^/    /')
+  Bump VERSION and add a CHANGELOG entry -- normally by cutting a release:
+    tools/release.py
+  or by hand, then re-commit."
+fi
+
+changelog="$(git show :CHANGELOG.md 2>/dev/null || cat CHANGELOG.md 2>/dev/null || true)"
+if ! echo "$changelog" | grep -qF "## ${version}"; then
+  fail "CHANGELOG.md has no '## ${version}' entry, but this commit changes what ships.
+  Add the entry (tools/release.py generates it) and stage CHANGELOG.md."
+fi
+
+# patches/ is generated. A hand-edited patch would build something the series does
+# not describe, and every later rebase would silently discard the edit.
+if echo "$ships" | grep -q '^patches/'; then
+  src="${SRC_DIR:-$HOME/src/jellyfin}"
+  series="${SERIES:-patched/10.11.11}"
+  base="${BASE_TAG:-v$(echo "$version" | sed 's/-p[0-9]*$//')}"
+  if git -C "$src" rev-parse --verify --quiet "$series" >/dev/null 2>&1; then
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    git -C "$src" format-patch --quiet --no-signature --zero-commit --no-numbered \
+      -o "$tmp" "$base..$series" >/dev/null 2>&1 || true
+    staged_dir="$(mktemp -d)"; trap 'rm -rf "$tmp" "$staged_dir"' EXIT
+    git show :patches 2>/dev/null >/dev/null || true
+    for f in $(git diff --cached --name-only --diff-filter=ACM -- patches); do
+      mkdir -p "$staged_dir/$(dirname "$f")"; git show ":$f" > "$staged_dir/$f"
+    done
+    if ! diff -rq "$tmp" "$staged_dir/patches" >/dev/null 2>&1; then
+      fail "staged patches/ does not match the series on ${series}.
+  patches/ is GENERATED -- edit the commit (git rebase -i) and run tools/regen-patches.sh.
+  If the series moved on purpose, run tools/regen-patches.sh and stage the result."
+    fi
+  fi
+fi
+exit 0
