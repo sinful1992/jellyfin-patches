@@ -32,6 +32,8 @@ WATCHED_BRANCHES = ["master", "release-10.11.z"]
 PATCH_DIR = Path(os.environ.get("JF_PATCH_DIR", Path.home() / "jellyfin-patches/patches"))
 SRC_DIR = Path(os.environ.get("JF_SRC_DIR", Path.home() / "src/jellyfin"))
 OUT_IMAGE = os.environ.get("JF_OUT_IMAGE", "jellyfin-patched:10.11.11")
+SERIES = os.environ.get("JF_SERIES", "patched/10.11.11")
+PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patches/tools/port-check.py"))
 
 # Files our patches touch. An upstream commit here means a rebase may conflict,
 # or that upstream fixed it themselves and we can drop a patch.
@@ -89,13 +91,34 @@ def post(content):
 
 
 def check_release(state, findings):
-    rel = get("https://api.github.com/repos/jellyfin/jellyfin/releases/latest")
-    tag = rel["tag_name"].lstrip("v")
-    if tag != state.get("last_release") and tag != PINNED:
-        findings.append(
-            f"**Jellyfin {tag} released** (we build from {PINNED})\n"
-            f"Rebasing means bumping Intro Skipper to match, they move together.\n{rel['html_url']}")
-    state["last_release"] = tag
+    """Track the newest stable AND the newest prerelease.
+
+    /releases/latest EXCLUDES prereleases. That single fact made this watcher
+    report "10.11.11 is upstream's latest" through seven v12.0 release candidates
+    while the 10.11 line was quietly abandoned -- a check that passes while the
+    thing it watches has moved on.
+    """
+    rels = get("https://api.github.com/repos/jellyfin/jellyfin/releases?per_page=20")
+    stable = next((r for r in rels if not r["prerelease"] and not r["draft"]), None)
+    pre = next((r for r in rels if r["prerelease"] and not r["draft"]), None)
+
+    if stable:
+        tag = stable["tag_name"].lstrip("v")
+        if tag != state.get("last_release") and tag != PINNED:
+            findings.append(
+                f"**Jellyfin {tag} released** (we build from {PINNED})\n"
+                f"Rebasing means bumping Intro Skipper to match, they move together.\n"
+                f"{stable['html_url']}")
+        state["last_release"] = tag
+
+    if pre:
+        tag = pre["tag_name"].lstrip("v")
+        if tag != state.get("last_prerelease"):
+            findings.append(
+                f"**Prerelease {tag}** is out (we build from {PINNED})\n"
+                f"Not a target to run, but it is where the next base comes from -- the "
+                f"port-check below says what moving would cost.\n{pre['html_url']}")
+        state["last_prerelease"] = tag
 
 
 def check_paths(state, findings):
@@ -160,52 +183,39 @@ def _run(cmd, cwd=None, timeout=900):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
-def check_patches_apply(state, findings):
-    """Dry-run the patch set onto a newly released upstream tag.
+def check_port(state, findings):
+    """Report, per commit, what moving the series to another base would cost.
 
-    'A file we touch changed upstream' is a hint; 'the patch no longer applies' is
-    the fact. This answers the second question, so the release notice arrives with a
-    verdict attached instead of a chore. Runs in a throwaway worktree -- $SRC_DIR
-    holds work in progress and must not be disturbed.
+    The series is commits now, not two hand-written patch files, so this can name
+    the commit that conflicts instead of saying "the patch set conflicts". It also
+    spots a backport upstream has since absorbed, which must be DROPPED at the bump
+    rather than resolved.
+
+    Only posts when the verdict CHANGES, so a standing "3 conflicts" does not become
+    daily noise.
     """
-    target = state.get("last_release")
-    if not target or target == PINNED:
-        return                                    # still on our base; nothing to rebase
-    if state.get("last_apply_check") == target:
-        return                                    # already reported a verdict for this tag
-
-    tag = "v" + target
-    patches = sorted(PATCH_DIR.glob("*.patch"))
-    if not patches:
-        findings.append(f"no patches found in `{PATCH_DIR}` -- cannot rebase-check {tag}")
+    targets = []
+    for key in ("last_release", "last_prerelease"):
+        tag = state.get(key)
+        if tag and tag != PINNED:
+            targets.append("v" + tag)
+    if not targets:
         return
 
     r = _run(["git", "fetch", "--tags", "--quiet", "origin"], cwd=SRC_DIR)
     if r.returncode != 0:
         raise RuntimeError(f"git fetch failed: {r.stderr.strip()[:300]}")
 
-    wt = Path(f"/tmp/jf-apply-check-{os.getpid()}")
-    r = _run(["git", "worktree", "add", "--detach", "-q", str(wt), tag], cwd=SRC_DIR)
-    if r.returncode != 0:
-        raise RuntimeError(f"worktree add {tag} failed: {r.stderr.strip()[:300]}")
-    try:
-        lines, conflicts = [], 0
-        for patch in patches:
-            r = _run(["git", "apply", "--check", str(patch)], cwd=wt)
-            if r.returncode == 0:
-                lines.append(f":white_check_mark: `{patch.name}` applies cleanly")
-            else:
-                conflicts += 1
-                why = (r.stderr.strip().splitlines() or ["unknown"])[0][:160]
-                lines.append(f":x: `{patch.name}` CONFLICTS -- {why}")
-    finally:
-        _run(["git", "worktree", "remove", "--force", str(wt)], cwd=SRC_DIR)
-        shutil.rmtree(wt, ignore_errors=True)
+    r = _run([sys.executable, str(PORT_CHECK), "--src-dir", str(SRC_DIR),
+              "--base-tag", "v" + PINNED, "--series", SERIES, *targets], timeout=900)
+    report = (r.stdout or r.stderr).strip()
+    if not report:
+        return
 
-    verdict = ("rebase needed by hand" if conflicts
-               else "`build/build.sh` with BASE_TAG=" + tag + " should just work")
-    findings.append(f"**Patch set vs {tag}** -- {verdict}\n" + "\n".join(lines))
-    state["last_apply_check"] = target
+    if report != state.get("last_port_report"):
+        findings.append("**Port check** -- what moving off " + PINNED + " would cost\n"
+                        "```\n" + report[:1500] + "\n```")
+    state["last_port_report"] = report
 
 
 def check_deployment(state, findings):
@@ -244,7 +254,7 @@ def main():
     errors = []
     for name, fn in (("release", check_release), ("paths", check_paths),
                      ("issues", check_issues), ("intro-skipper", check_intro_skipper),
-                     ("patch-apply", check_patches_apply), ("deployment", check_deployment)):
+                     ("port-check", check_port), ("deployment", check_deployment)):
         try:
             fn(state, findings)
         except Exception as exc:  # a broken check must be loud, never silent

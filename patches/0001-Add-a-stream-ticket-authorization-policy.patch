@@ -1,0 +1,365 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Giedrius <agnutritions@gmail.com>
+Date: Sun, 6 Sep 2026 21:46:58 +0100
+Subject: [PATCH] Add a stream-ticket authorization policy
+
+The media endpoints cannot take a bare [Authorize]: Jellyfin for Android TV
+composes stream URLs itself and attaches no credential, so requiring normal
+authentication turns every direct play into a server-side HLS remux.
+
+Instead, a short-lived ticket is minted for a session that has already
+authenticated through PlaybackInfo, and the stream endpoints accept that ticket.
+
+Registered in ApplicationHost rather than Jellyfin.Server's
+AddJellyfinApiAuthorization so the change stays inside the assemblies the local
+build already replaces.
+---
+ .../ApplicationHost.cs                        |  17 +++
+ .../StreamAccessPolicy/IStreamTicketStore.cs  |  31 +++++
+ .../StreamAccessPolicy/StreamAccessHandler.cs | 100 +++++++++++++++
+ .../StreamAccessRequirement.cs                |  23 ++++
+ .../StreamAccessPolicy/StreamTicketStore.cs   | 118 ++++++++++++++++++
+ 5 files changed, 289 insertions(+)
+ create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/IStreamTicketStore.cs
+ create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
+ create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessRequirement.cs
+ create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
+
+diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
+index cbb0f6c565..81d10b52c8 100644
+--- a/Emby.Server.Implementations/ApplicationHost.cs
++++ b/Emby.Server.Implementations/ApplicationHost.cs
+@@ -35,6 +35,7 @@ using Emby.Server.Implementations.Session;
+ using Emby.Server.Implementations.SyncPlay;
+ using Emby.Server.Implementations.TV;
+ using Emby.Server.Implementations.Updates;
++using Jellyfin.Api.Auth.StreamAccessPolicy;
+ using Jellyfin.Api.Helpers;
+ using Jellyfin.Drawing;
+ using Jellyfin.MediaEncoding.Hls.Playlist;
+@@ -98,6 +99,7 @@ using MediaBrowser.XbmcMetadata.Providers;
+ using Microsoft.AspNetCore.Http;
+ using Microsoft.AspNetCore.Mvc;
+ using Microsoft.Extensions.Configuration;
++using Microsoft.AspNetCore.Authorization;
+ using Microsoft.Extensions.DependencyInjection;
+ using Microsoft.Extensions.Logging;
+ using Prometheus.DotNetRuntime;
+@@ -574,6 +576,21 @@ namespace Emby.Server.Implementations
+ 
+             serviceCollection.AddSingleton<ITranscodeManager, TranscodeManager>();
+             serviceCollection.AddScoped<MediaInfoHelper>();
++
++            // Streaming access. Registered here rather than in Jellyfin.Server's
++            // AddJellyfinApiAuthorization because AuthorizationOptions composes across every
++            // Configure delegate, and this keeps the change inside the assemblies the local
++            // build already replaces.
++            serviceCollection.AddSingleton<IStreamTicketStore, StreamTicketStore>();
++            serviceCollection.AddSingleton<IAuthorizationHandler, StreamAccessHandler>();
++            serviceCollection.Configure<AuthorizationOptions>(options =>
++            {
++                options.AddPolicy(
++                    StreamAccessRequirement.PolicyName,
++                    policy => policy
++                        .AddAuthenticationSchemes(Jellyfin.Api.Constants.AuthenticationSchemes.CustomAuthentication)
++                        .AddRequirements(new StreamAccessRequirement()));
++            });
+             serviceCollection.AddScoped<AudioHelper>();
+             serviceCollection.AddScoped<DynamicHlsHelper>();
+             serviceCollection.AddScoped<IClientEventLogger, ClientEventLogger>();
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/IStreamTicketStore.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/IStreamTicketStore.cs
+new file mode 100644
+index 0000000000..c49acef8d5
+--- /dev/null
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/IStreamTicketStore.cs
+@@ -0,0 +1,31 @@
++using System;
++using System.Collections.Generic;
++using System.Net;
++
++namespace Jellyfin.Api.Auth.StreamAccessPolicy
++{
++    /// <summary>
++    /// Short-lived grants that let an already-authenticated playback negotiation authorize
++    /// the credential-less media requests the client makes immediately afterwards.
++    /// </summary>
++    public interface IStreamTicketStore
++    {
++        /// <summary>
++        /// Records that <paramref name="remoteAddress"/> authenticated and negotiated playback
++        /// of the given item and media sources.
++        /// </summary>
++        /// <param name="remoteAddress">Normalized remote address of the negotiating client.</param>
++        /// <param name="userId">The authenticated user, recorded for diagnostics.</param>
++        /// <param name="ids">Item id and media source ids the negotiation covered.</param>
++        void Issue(IPAddress? remoteAddress, Guid userId, IReadOnlyList<Guid> ids);
++
++        /// <summary>
++        /// Looks for a live ticket covering any of <paramref name="ids"/> for
++        /// <paramref name="remoteAddress"/>, extending it when one is found.
++        /// </summary>
++        /// <param name="remoteAddress">Normalized remote address of the requesting client.</param>
++        /// <param name="ids">Candidate ids taken from the request route and query.</param>
++        /// <returns><c>true</c> if a live ticket covered the request.</returns>
++        bool TryRedeem(IPAddress? remoteAddress, IReadOnlyList<Guid> ids);
++    }
++}
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
+new file mode 100644
+index 0000000000..79a7f0ffff
+--- /dev/null
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
+@@ -0,0 +1,100 @@
++using System;
++using System.Collections.Generic;
++using System.Threading.Tasks;
++using Jellyfin.Api.Extensions;
++using Jellyfin.Extensions;
++using MediaBrowser.Common.Extensions;
++using Microsoft.AspNetCore.Authorization;
++using Microsoft.AspNetCore.Http;
++
++namespace Jellyfin.Api.Auth.StreamAccessPolicy
++{
++    /// <summary>
++    /// Authorizes the media file endpoints.
++    /// </summary>
++    /// <remarks>
++    /// These routes cannot simply require credentials: several official clients compose the
++    /// media URL themselves from the playback negotiation result and attach no token to it
++    /// (measured on Jellyfin for Android TV 0.19.10), so a plain [Authorize] 401s them off
++    /// direct play and onto a server-side remux. Instead an authenticated PlaybackInfo call
++    /// issues a short-lived ticket for the item and its media sources, bound to the caller's
++    /// address, and this handler redeems it. Anonymous callers who never negotiated playback
++    /// get nothing, which is the case the endpoints were open to before.
++    /// </remarks>
++    public class StreamAccessHandler : AuthorizationHandler<StreamAccessRequirement>
++    {
++        private static readonly string[] _idRouteKeys =
++        {
++            "itemId",
++            "routeItemId",
++            "videoId",
++            "mediaSourceId",
++            "routeMediaSourceId"
++        };
++
++        private readonly IStreamTicketStore _ticketStore;
++        private readonly IHttpContextAccessor _httpContextAccessor;
++
++        /// <summary>
++        /// Initializes a new instance of the <see cref="StreamAccessHandler"/> class.
++        /// </summary>
++        /// <param name="ticketStore">Instance of the <see cref="IStreamTicketStore"/> interface.</param>
++        /// <param name="httpContextAccessor">Instance of the <see cref="IHttpContextAccessor"/> interface.</param>
++        public StreamAccessHandler(
++            IStreamTicketStore ticketStore,
++            IHttpContextAccessor httpContextAccessor)
++        {
++            _ticketStore = ticketStore;
++            _httpContextAccessor = httpContextAccessor;
++        }
++
++        /// <inheritdoc />
++        protected override Task HandleRequirementAsync(AuthorizationHandlerContext context, StreamAccessRequirement requirement)
++        {
++            ArgumentNullException.ThrowIfNull(context);
++
++            // A caller that did present credentials is treated like any other endpoint.
++            // DefaultAuthorizationHandler has already had its chance to Fail() this context
++            // on remote access or parental schedule, and that failure outranks this success.
++            if (context.User.GetIsApiKey() || !context.User.GetUserId().IsEmpty())
++            {
++                context.Succeed(requirement);
++                return Task.CompletedTask;
++            }
++
++            var httpContext = _httpContextAccessor.HttpContext;
++            if (httpContext is not null
++                && _ticketStore.TryRedeem(httpContext.GetNormalizedRemoteIP(), GetCandidateIds(httpContext)))
++            {
++                context.Succeed(requirement);
++                return Task.CompletedTask;
++            }
++
++            context.Fail();
++            return Task.CompletedTask;
++        }
++
++        private static IReadOnlyList<Guid> GetCandidateIds(HttpContext httpContext)
++        {
++            var ids = new List<Guid>(_idRouteKeys.Length + 1);
++
++            foreach (var key in _idRouteKeys)
++            {
++                if (httpContext.Request.RouteValues.TryGetValue(key, out var routeValue)
++                    && Guid.TryParse(routeValue?.ToString(), out var routeId))
++                {
++                    ids.Add(routeId);
++                }
++            }
++
++            // Direct play sends the media source id in the query string, not the route.
++            if (httpContext.Request.Query.TryGetValue("mediaSourceId", out var queryValue)
++                && Guid.TryParse(queryValue.ToString(), out var queryId))
++            {
++                ids.Add(queryId);
++            }
++
++            return ids;
++        }
++    }
++}
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessRequirement.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessRequirement.cs
+new file mode 100644
+index 0000000000..e3f875c512
+--- /dev/null
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessRequirement.cs
+@@ -0,0 +1,23 @@
++using Jellyfin.Api.Auth.DefaultAuthorizationPolicy;
++
++namespace Jellyfin.Api.Auth.StreamAccessPolicy
++{
++    /// <summary>
++    /// Authorization requirement for the media file endpoints.
++    /// </summary>
++    /// <remarks>
++    /// Derives from <see cref="DefaultAuthorizationRequirement"/> on purpose: that makes
++    /// <see cref="DefaultAuthorizationHandler"/> run for this requirement too, so an
++    /// authenticated caller still gets the remote-access permission and parental-schedule
++    /// checks. That handler deliberately does not Succeed for a subclassed requirement,
++    /// leaving the decision to <see cref="StreamAccessHandler"/>, but a Fail() from it is
++    /// final and cannot be undone here.
++    /// </remarks>
++    public class StreamAccessRequirement : DefaultAuthorizationRequirement
++    {
++        /// <summary>
++        /// The name this policy is registered under.
++        /// </summary>
++        public const string PolicyName = "StreamAccess";
++    }
++}
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
+new file mode 100644
+index 0000000000..8786b50185
+--- /dev/null
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
+@@ -0,0 +1,118 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.Net;
++using System.Threading;
++using Jellyfin.Extensions;
++
++namespace Jellyfin.Api.Auth.StreamAccessPolicy
++{
++    /// <summary>
++    /// In-memory <see cref="IStreamTicketStore"/>.
++    /// </summary>
++    /// <remarks>
++    /// Deliberately not persisted. A ticket is only useful for the playback it was issued
++    /// for, and a server restart tears down the streams anyway; on the next play the client
++    /// re-negotiates and a fresh ticket is issued.
++    /// </remarks>
++    public class StreamTicketStore : IStreamTicketStore
++    {
++        /// <summary>
++        /// How long a ticket stays valid without being used. Every successful media request
++        /// slides it, so this only has to outlast the gap between negotiating playback and
++        /// the next byte range the client asks for -- which for a paused client can be long.
++        /// </summary>
++        public static readonly TimeSpan TicketLifetime = TimeSpan.FromHours(4);
++
++        private const int PruneCountThreshold = 256;
++
++        private static readonly TimeSpan _pruneInterval = TimeSpan.FromMinutes(5);
++
++        private readonly ConcurrentDictionary<TicketKey, DateTimeOffset> _tickets = new();
++
++        private long _lastPruneTicks = DateTimeOffset.UtcNow.UtcTicks;
++
++        /// <inheritdoc />
++        public void Issue(IPAddress? remoteAddress, Guid userId, IReadOnlyList<Guid> ids)
++        {
++            ArgumentNullException.ThrowIfNull(ids);
++
++            var address = Normalize(remoteAddress);
++            var expiry = DateTimeOffset.UtcNow + TicketLifetime;
++
++            for (var i = 0; i < ids.Count; i++)
++            {
++                if (ids[i].IsEmpty())
++                {
++                    continue;
++                }
++
++                _tickets[new TicketKey(address, ids[i])] = expiry;
++            }
++
++            Prune();
++        }
++
++        /// <inheritdoc />
++        public bool TryRedeem(IPAddress? remoteAddress, IReadOnlyList<Guid> ids)
++        {
++            ArgumentNullException.ThrowIfNull(ids);
++
++            var address = Normalize(remoteAddress);
++            var now = DateTimeOffset.UtcNow;
++            var redeemed = false;
++
++            for (var i = 0; i < ids.Count; i++)
++            {
++                if (ids[i].IsEmpty())
++                {
++                    continue;
++                }
++
++                var key = new TicketKey(address, ids[i]);
++                if (!_tickets.TryGetValue(key, out var expiry))
++                {
++                    continue;
++                }
++
++                if (expiry <= now)
++                {
++                    _tickets.TryRemove(new KeyValuePair<TicketKey, DateTimeOffset>(key, expiry));
++                    continue;
++                }
++
++                // Slide the ticket so a long playback does not expire mid-stream.
++                _tickets[key] = now + TicketLifetime;
++                redeemed = true;
++            }
++
++            return redeemed;
++        }
++
++        private static string Normalize(IPAddress? remoteAddress)
++            // A null address means loopback, which AnonymousLanAccessHandler treats the same way.
++            => remoteAddress?.ToString() ?? string.Empty;
++
++        private void Prune()
++        {
++            var now = DateTimeOffset.UtcNow;
++            var last = new DateTimeOffset(Interlocked.Read(ref _lastPruneTicks), TimeSpan.Zero);
++            if (_tickets.Count < PruneCountThreshold && now - last < _pruneInterval)
++            {
++                return;
++            }
++
++            Interlocked.Exchange(ref _lastPruneTicks, now.UtcTicks);
++
++            foreach (var ticket in _tickets)
++            {
++                if (ticket.Value <= now)
++                {
++                    _tickets.TryRemove(ticket);
++                }
++            }
++        }
++
++        private readonly record struct TicketKey(string Address, Guid Id);
++    }
++}

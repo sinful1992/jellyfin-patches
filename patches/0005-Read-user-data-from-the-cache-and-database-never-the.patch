@@ -1,14 +1,17 @@
-Read user data from the cache and database, not the item snapshot
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Giedrius <agnutritions@gmail.com>
+Date: Sun, 6 Sep 2026 21:46:58 +0100
+Subject: [PATCH] Read user data from the cache and database, never the item
+ snapshot
 
-BaseItem.UserData is a snapshot taken when that instance was materialised.
-Instances outlive their entry in the library cache (an LRU of ProcessorCount*100
-== 800 entries here, against ~18k items) and SessionInfo.FullNowPlayingItem pins
-one for an entire playback session. Seeding the shared user-data cache from that
-snapshot makes a stale value authoritative, so a favourite set through a newer
-instance is reverted by the next progress report, which writes every column.
-
-This release already has a cache-first-then-database overload; the BaseItem
-overload simply was not using it.
+item.UserData is a snapshot taken when the BaseItem was materialised, and
+instances outlive their library-cache entry -- SessionInfo.FullNowPlayingItem
+pins one for a whole playback session. Seeding the shared cache from a stale
+snapshot makes it authoritative for every later reader, so a favourite set
+through a newer instance is reverted by the next progress report.
+---
+ .../Library/UserDataManager.cs                | 21 ++++++++++++-------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
 
 diff --git a/Emby.Server.Implementations/Library/UserDataManager.cs b/Emby.Server.Implementations/Library/UserDataManager.cs
 index 45a5e1ef94..8a6285d0a5 100644

@@ -13,14 +13,11 @@ BASE_IMAGE="${BASE_IMAGE:-lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls43}"
 OUT_IMAGE="${OUT_IMAGE:-jellyfin-patched:10.11.11}"
 DOTNET="${DOTNET:-$HOME/.dotnet/dotnet}"
 
-# The four assemblies our patches produce. Kept explicit: copying the whole build
-# output over the image would replace files the base image intentionally differs on.
-ASSEMBLIES=(
-  Jellyfin.Api.dll
-  Emby.Server.Implementations.dll
-  Jellyfin.Server.Implementations.dll
-  MediaBrowser.Controller.dll
-)
+# ASSEMBLIES is DERIVED from what the patch set actually touches -- see "deriving the
+# assemblies to replace" below. It used to be a hand-maintained list of four, which is
+# a silent-failure hole: a patch touching a project outside the list builds green and
+# ships an image missing that half of the fix. Patched source, unpatched binary, exit 0.
+ASSEMBLIES=()
 
 say() { printf '\n=== %s ===\n' "$*"; }
 
@@ -82,6 +79,58 @@ API_VER="$(dep_ver "$BASE_DEPS" Jellyfin.Api.dll)" \
   || { echo "could not read Jellyfin.Api version from the base image"; exit 1; }
 echo "  base image ships Jellyfin.Api at ${API_VER}"
 
+say "deriving the assemblies to replace from the patch set"
+# Every non-test file a patch touches must land in an assembly we actually ship.
+# The mapping is the first path segment (the project directory) -> <project>.dll, and
+# every result must exist in the base image's dependency graph. Anything that does not
+# map is a hard failure: it means the build would quietly drop that change.
+DERIVED="$(
+  python3 - "$BASE_DEPS" "$REPO_DIR"/patches/*.patch <<'DERIVE'
+import json, re, sys
+
+deps_path, patches = sys.argv[1], sys.argv[2:]
+
+shipped = set()
+deps = json.load(open(deps_path))
+for tgt in deps.get("targets", {}).values():
+    for info in tgt.values():
+        for f in (info.get("runtime") or {}):
+            shipped.add(f.split("/")[-1])
+
+touched = set()
+for path in patches:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            m = re.match(r"^(?:\+\+\+ b/|--- a/)(.+?)\s*$", line)
+            if m and m.group(1) != "/dev/null":
+                touched.add(m.group(1))
+
+projects, unmapped = set(), []
+for f in sorted(touched):
+    # Tests are compiled but never shipped into the image, so they map to nothing.
+    if f.startswith("tests/"):
+        continue
+    proj = f.split("/")[0]
+    dll = proj + ".dll"
+    if dll in shipped:
+        projects.add(dll)
+    else:
+        unmapped.append(f + " -> " + dll + " (not in the base image)")
+
+if unmapped:
+    print("UNMAPPED -- these patched files map to no shippable assembly:", file=sys.stderr)
+    for u in unmapped:
+        print("  " + u, file=sys.stderr)
+    sys.exit(1)
+
+print("\n".join(sorted(projects)))
+DERIVE
+)" || { echo "ABORTING: a patched file maps to no shippable assembly (see above)."; exit 1; }
+
+mapfile -t ASSEMBLIES <<< "$DERIVED"
+[ "${#ASSEMBLIES[@]}" -gt 0 ] || { echo "no assemblies derived from the patch set"; exit 1; }
+for a in "${ASSEMBLIES[@]}"; do echo "  will replace $a"; done
+
 say "building (net9 required for 10.11.x)"
 "$DOTNET" build Jellyfin.Server/Jellyfin.Server.csproj -c Release --nologo -v q \
   -p:AssemblyVersion="$API_VER" -p:FileVersion="$API_VER"
@@ -133,7 +182,15 @@ REV="$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo local)"
 docker build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "PATCH_REV=${REV}" \
   -t "$OUT_IMAGE" "$STAGE"
 
+# A green compile proves the SOURCE was patched. Only this proves the IMAGE was --
+# and since this fork is run regardless of upstream, nothing else ever will.
+say "smoke-testing ${OUT_IMAGE}"
+"$REPO_DIR/tools/smoke-test.sh" "$OUT_IMAGE" \
+  || { echo "ABORTING: the built image does not enforce the auth patch."; exit 1; }
+
 say "done"
-echo "Built ${OUT_IMAGE} from ${BASE_TAG} + $(ls -1 "$REPO_DIR"/patches/*.patch 2>/dev/null | wc -l) patch(es)."
+echo "Built ${OUT_IMAGE} from ${BASE_TAG} + $(ls -1 "$REPO_DIR"/patches/*.patch 2>/dev/null | wc -l) patch(es),"
+echo "replacing: ${ASSEMBLIES[*]}"
+echo "Smoke test passed: unauthenticated media endpoints are rejected."
 echo "It is NOT running yet. To switch, point the jellyfin service at ${OUT_IMAGE}."
 echo "To roll back, point it back at ${BASE_IMAGE}."

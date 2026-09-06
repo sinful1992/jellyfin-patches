@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Robibero <cody@robibe.ro>
+Date: Sat, 5 Sep 2026 12:16:25 -0400
+Subject: [PATCH] Backport: fix PGS subtitles for BDMV with TrueHD
+
+Upstream jellyfin/jellyfin#17674, taken from master rather than waited for,
+because the 10.11 line is dead upstream: release-10.11.z has had no commits
+since v10.11.11 (2026-06-06) and every release since is a v12.0 prerelease.
+
+Conflict resolved by hand: master's hunk in SubtitleEncoder.cs carries an
+adjacent VobSub/MKS line that does not exist at 10.11.11. Only the stream-index
+fix is taken.
+
+Note this is the first change to reach MediaBrowser.MediaEncoding, which the
+build did not previously ship -- the derived-assembly gate in build.sh is what
+turns that from a silently half-applied patch into a build-time fact.
+
+(cherry picked from commit 7c463f5fba1d1aefa7505144a22b6526de540319)
+---
+ .../MediaEncoding/EncodingHelper.cs           | 20 ++++++++++++++++++-
+ .../Subtitles/SubtitleEncoder.cs              |  4 ++--
+ 2 files changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+index 8aeec3f3d6..c5682b9688 100644
+--- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
++++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+@@ -6231,7 +6231,7 @@ namespace MediaBrowser.Controller.MediaEncoding
+                         string.Join(',', overlayFilters));
+ 
+                 var mapPrefix = Convert.ToInt32(state.SubtitleStream.IsExternal);
+-                var subtitleStreamIndex = FindIndex(state.MediaSource.MediaStreams, state.SubtitleStream);
++                var subtitleStreamIndex = GetSubtitleStreamIndexForFfmpeg(state.MediaSource, state.SubtitleStream);
+                 var videoStreamIndex = FindIndex(state.MediaSource.MediaStreams, state.VideoStream);
+ 
+                 if (hasSubs)
+@@ -7842,6 +7842,24 @@ namespace MediaBrowser.Controller.MediaEncoding
+             return -1;
+         }
+ 
++        public static int GetSubtitleStreamIndexForFfmpeg(MediaSourceInfo mediaSource, MediaStream subtitleStream)
++        {
++            var index = FindIndex(mediaSource.MediaStreams, subtitleStream);
++            if (index == -1 || subtitleStream.IsExternal || mediaSource.VideoType != VideoType.BluRay)
++            {
++                return index;
++            }
++
++            var hiddenStreamsBefore = mediaSource.MediaStreams.Count(s =>
++                s.Type == MediaStreamType.Audio
++                && !s.IsExternal
++                && (string.Equals(s.Codec, "truehd", StringComparison.OrdinalIgnoreCase)
++                    || string.Equals(s.Codec, "atmos", StringComparison.OrdinalIgnoreCase))
++                && s.Index < subtitleStream.Index);
++
++            return index + hiddenStreamsBefore;
++        }
++
+         public static bool IsCopyCodec(string codec)
+         {
+             return string.Equals(codec, "copy", StringComparison.OrdinalIgnoreCase);
+diff --git a/MediaBrowser.MediaEncoding/Subtitles/SubtitleEncoder.cs b/MediaBrowser.MediaEncoding/Subtitles/SubtitleEncoder.cs
+index cb220370d1..0a3e09181e 100644
+--- a/MediaBrowser.MediaEncoding/Subtitles/SubtitleEncoder.cs
++++ b/MediaBrowser.MediaEncoding/Subtitles/SubtitleEncoder.cs
+@@ -610,7 +610,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
+             List<MediaStream> subtitleStreams,
+             CancellationToken cancellationToken)
+         {
+-            var inputPath = _mediaEncoder.GetInputArgument(mediaSource.Path, mediaSource);
++            var inputPath = _mediaEncoder.GetInputPathArgument(mediaSource.Path, mediaSource);
+             var outputPaths = new List<string>();
+             var args = string.Format(
+                 CultureInfo.InvariantCulture,
+@@ -627,7 +627,7 @@ namespace MediaBrowser.MediaEncoding.Subtitles
+ 
+                 var outputPath = GetSubtitleCachePath(mediaSource, subtitleStream.Index, "." + GetExtractableSubtitleFileExtension(subtitleStream));
+                 var outputCodec = IsCodecCopyable(subtitleStream.Codec) ? "copy" : "srt";
+-                var streamIndex = EncodingHelper.FindIndex(mediaSource.MediaStreams, subtitleStream);
++                var streamIndex = EncodingHelper.GetSubtitleStreamIndexForFfmpeg(mediaSource, subtitleStream);
+ 
+                 if (streamIndex == -1)
+                 {
