@@ -169,9 +169,10 @@ file that maps to no shippable assembly fails the build rather than being droppe
 
     ./build/build.sh
 
-Building from the `v10.11.11` **tag** keeps `AssemblyVersion("10.11.11")`, which is
-what ABI-pinned plugins need — Intro Skipper is versioned `1.10.11.x` against
-exactly this server. Building from `master` would not work: it is 2000+ commits
+Building from the `v10.11.11` **tag** keeps `AssemblyVersion("10.11.11")`, which the
+overlay requires anyway: the image is a closed binding graph, so every assembly we
+emit must match what the base image ships. ABI-pinned plugins get that for free as a
+side effect — but no plugin gates the base version. Building from `master` would not work: it is 2000+ commits
 ahead, a 10.12-dev jump that breaks the plugin and touches the database schema.
 
 Before it finishes, the script runs `tools/smoke-test.sh` against the image it just
@@ -206,8 +207,9 @@ It reports:
   dropped). The release branch matters most: a 10.11.z security backport lands there,
   and the GitHub commits API only looks at the default branch unless told otherwise.
 - any of the six tracked issues closing upstream (our patch may be redundant)
-- Intro Skipper releases (it is what pins the base version, so its support for a
-  newer server is what opens the upgrade path)
+- Intro Skipper releases -- **informational only**. It is a nice-to-have plugin and
+  does not gate a base bump, a feature, or an update; it is reported so a bump can
+  bring a matching build along if one exists.
 - **local drift** -- that `jellyfin-patched` still exists and is what the `jellyfin`
   container is actually running. The image is built locally and exists in no registry,
   so `docker image prune -a` or a stray `compose pull` can put the stock image back

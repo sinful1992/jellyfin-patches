@@ -107,7 +107,8 @@ def check_release(state, findings):
         if tag != state.get("last_release") and tag != PINNED:
             findings.append(
                 f"**Jellyfin {tag} released** (we build from {PINNED})\n"
-                f"Rebasing means bumping Intro Skipper to match, they move together.\n"
+                f"The port-check below is the cost. Plugins do not gate this: Intro "
+                f"Skipper is nice-to-have, and a base bump does not wait for it.\n"
                 f"{stable['html_url']}")
         state["last_release"] = tag
 
@@ -174,8 +175,8 @@ def check_intro_skipper(state, findings):
         if state.get("last_intro_skipper"):
             findings.append(
                 f"**Intro Skipper {tag}** released\n"
-                f"It is what pins us to {PINNED}; a build targeting a newer server "
-                f"is what opens the upgrade path.\n{rel['html_url']}")
+                f"FYI only -- it is a nice-to-have, not a gate on anything. Reported so a "
+                f"base bump can pick up a matching build if one exists.\n{rel['html_url']}")
         state["last_intro_skipper"] = tag
 
 
