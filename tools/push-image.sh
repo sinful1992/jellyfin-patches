@@ -59,12 +59,15 @@ docker tag "$LOCAL" "$REMOTE"
 docker push "$REMOTE"
 
 if [ "$PUBLIC" = "1" ]; then
-  # Packages default to private; public matches the repo, which already carries the
-  # patches in full. Non-fatal: a failure here costs visibility, not the push.
-  gh api --method PATCH "/user/packages/container/jellyfin-patched" \
-    -f visibility=public >/dev/null 2>&1 \
-    && echo "  package visibility: public" \
-    || echo "  (could not set visibility -- set it in the package settings if you want it public)"
+  # Packages default to private, and visibility CANNOT be changed over the REST API --
+  # GET /user/packages/container/<name> works, PATCH 404s; it is a web-UI-only setting.
+  # Report the state and the link rather than pretending to have set it.
+  vis="$(gh api "/user/packages/container/jellyfin-patched" --jq .visibility 2>/dev/null || echo unknown)"
+  echo "  package visibility: ${vis}"
+  if [ "$vis" != "public" ]; then
+    echo "  to make it public (web UI only):"
+    echo "    https://github.com/users/${OWNER}/packages/container/jellyfin-patched/settings"
+  fi
 fi
 
 echo
