@@ -3,3 +3,4 @@
 
 # local pre-edit backups
 *.bak-*
+__pycache__/
