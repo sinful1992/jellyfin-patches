@@ -144,14 +144,21 @@ mapfile -t ASSEMBLIES <<< "$DERIVED"
 [ "${#ASSEMBLIES[@]}" -gt 0 ] || { echo "no assemblies derived from the patch set"; exit 1; }
 for a in "${ASSEMBLIES[@]}"; do echo "  will replace $a"; done
 
-say "building (net9 required for 10.11.x)"
+say "building (net9 for 10.11.x, net10 for 12.0 -- global.json decides)"
 "$DOTNET" build Jellyfin.Server/Jellyfin.Server.csproj -c Release --nologo -v q \
   -p:AssemblyVersion="$API_VER" -p:FileVersion="$API_VER"
 
 # Gate: compare EVERY assembly common to both graphs, not just the 4 we replace --
 # a version drift in something a replaced DLL references breaks binding just as hard.
 say "verifying assembly versions against the base image"
-OUR_DEPS="$WORKTREE/Jellyfin.Server/bin/Release/net9.0/jellyfin.deps.json"
+# The target framework moves with the base -- net9.0 for 10.11.x, net10.0 for 12.0 --
+# so discover it instead of hardcoding it. Hardcoded net9.0 made a 12.0 build fail
+# the version gate with "no deps.json" AFTER compiling successfully.
+BIN="$(ls -d "$WORKTREE"/Jellyfin.Server/bin/Release/net*/ 2>/dev/null | head -1)"
+BIN="${BIN%/}"
+[ -n "$BIN" ] || { echo "no build output under Jellyfin.Server/bin/Release"; exit 1; }
+echo "  build output: ${BIN##*/}"
+OUR_DEPS="$BIN/jellyfin.deps.json"
 [ -f "$OUR_DEPS" ] || { echo "no deps.json at $OUR_DEPS"; exit 1; }
 python3 - "$BASE_DEPS" "$OUR_DEPS" <<'PY' || { echo; echo "ABORTING: fix the versions before building an image."; exit 1; }
 import json, sys
@@ -182,7 +189,6 @@ PY
 say "collecting patched assemblies"
 STAGE="$(mktemp -d)"
 mkdir -p "$STAGE/dll"
-BIN="$WORKTREE/Jellyfin.Server/bin/Release/net9.0"
 for a in "${ASSEMBLIES[@]}"; do
   [ -f "$BIN/$a" ] || { echo "missing build output: $a"; exit 1; }
   cp "$BIN/$a" "$STAGE/dll/"
