@@ -3,6 +3,30 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 10.11.11-p5 — 2026-09-07
+
+Base `v10.11.11` · image `jellyfin-patched:10.11.11-p5`
+Built on `lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls47@sha256:438e44330078e6b1a810fdec9dc0f4773e6595edb137c5eb4417a516da4c7f0e`
+
+No change to the patch series; rebuilt for tooling or base reasons.
+
+<details><summary>Contains 6 change(s)</summary>
+
+- Add a stream-ticket authorization policy
+- Issue a stream ticket when playback info is requested
+- Require a stream ticket on the media endpoints
+- Add regression tests for media endpoint authentication
+- Read user data from the cache and database, never the item snapshot
+- Backport: fix PGS subtitles for BDMV with TrueHD
+
+</details>
+
+### Tooling
+- Functionally test 12.0 on a copy of the live config
+- 12.0 on the nightly base: tested, and it works
+
+Assemblies replaced: Emby.Server.Implementations.dll, Jellyfin.Api.dll, MediaBrowser.Controller.dll, MediaBrowser.MediaEncoding.dll
+
 ## 10.11.11-p4 — 2026-09-06
 
 Base `v10.11.11` · image `jellyfin-patched:10.11.11-p4`
