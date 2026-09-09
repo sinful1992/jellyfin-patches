@@ -8,6 +8,11 @@ gated and smoke-tested image.
 Base `v12.0` · image `jellyfin-patched:12.0-p1`
 Built on `lscr.io/linuxserver/jellyfin:12.0ubu2604-ls48@sha256:0f42497a69fa0441bfd5f9d6bba8694f2a656ec984e571d0ac04c6dd91250039`
 
+**DEPLOYED 2026-09-09 10:59.** Live server migrated 10.11.11 → 12.0 (34 migrations),
+Intro Skipper swapped to 12.0.2.0, 0 errors, `vaapi` intact, auth patch live.
+Pre-migration backup: `/mnt/data/docker-data/_jellyfin-pre-12.0-backup-20260909-105748`.
+**Rollback is no longer a compose edit alone** — the database schema moved.
+
 **Base bump: 10.11.11 → 12.0, and the series moves with it.** `patched/12.0` is now the
 source of truth; `patched/10.11.11` is archived and still rebuildable from tag
 `v10.11.11-p5`. Upstream cut `v12.0` on 2026-09-08 and LinuxServer published a
