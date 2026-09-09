@@ -8,7 +8,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$HOME/jellyfin-patches}"
 STAGE=""
 SRC_DIR="${SRC_DIR:-$HOME/src/jellyfin}"
-BASE_TAG="${BASE_TAG:-v10.11.11}"
+BASE_TAG="${BASE_TAG:-v12.0}"
 
 # One source of truth for both, read by build.sh, tools/release.sh and the watcher.
 #

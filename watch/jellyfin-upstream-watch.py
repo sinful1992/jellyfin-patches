@@ -19,14 +19,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BOT = "Bloodhound"
-PINNED = "10.11.11"                       # the server release we build from
+PINNED = "12.0"                           # the server release we build from
 STATE = Path(os.environ.get("JF_WATCH_STATE", Path.home() / ".local/state/jellyfin-watch/state.json"))
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# Branches to scan. master alone is NOT enough: a 10.11.z point release -- the most
+# Branches to scan. master alone is NOT enough: a 12.z point release -- the most
 # likely thing to actually matter, e.g. a security backport -- lands on the release
 # branch, and GitHub's commits API defaults to the default branch only.
-WATCHED_BRANCHES = ["master", "release-10.11.z"]
+WATCHED_BRANCHES = ["master", "release-12.z"]
 
 # The patches, in the order build.sh applies them.
 PATCH_DIR = Path(os.environ.get("JF_PATCH_DIR", Path.home() / "jellyfin-patches/patches"))
@@ -62,7 +62,7 @@ def _expected_images():
 
 
 OUT_IMAGE = os.environ.get("JF_OUT_IMAGE") or _expected_images()[0]
-SERIES = os.environ.get("JF_SERIES", "patched/10.11.11")
+SERIES = os.environ.get("JF_SERIES", "patched/12.0")
 PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patches/tools/port-check.py"))
 
 # Files our patches touch. An upstream commit here means a rebase may conflict,
@@ -236,6 +236,25 @@ def check_port(state, findings):
     r = _run(["git", "fetch", "--tags", "--quiet", "origin"], cwd=SRC_DIR)
     if r.returncode != 0:
         raise RuntimeError(f"git fetch failed: {r.stderr.strip()[:300]}")
+
+    # Never port-check BACKWARDS. After a base bump the newest *prerelease* on record
+    # can be older than what we now build from (pinning 12.0 leaves last_prerelease at
+    # 12.0-rc7), which would report the cost of moving to a base we have already passed.
+    forward = []
+    for tag in targets:
+        # Resolve first: merge-base exits non-zero for "not an ancestor" AND for "bad
+        # revision", so an unfetched or deleted tag would otherwise look like a forward
+        # target and then blow up port-check on an unknown ref.
+        if _run(["git", "rev-parse", "--verify", "--quiet", tag + "^{commit}"],
+                cwd=SRC_DIR).returncode != 0:
+            findings.append(f"port-check: upstream tag `{tag}` does not resolve; skipped")
+            continue
+        anc = _run(["git", "merge-base", "--is-ancestor", tag, "v" + PINNED], cwd=SRC_DIR)
+        if anc.returncode != 0:
+            forward.append(tag)
+    targets = forward
+    if not targets:
+        return
 
     r = _run([sys.executable, str(PORT_CHECK), "--src-dir", str(SRC_DIR),
               "--base-tag", "v" + PINNED, "--series", SERIES, *targets], timeout=900)

@@ -122,22 +122,29 @@ the pinned ABI.
 
 This is a permanent fork, not a waiting room. Upstream has not fixed the auth defect
 in **any** shipping version -- `AudioController.GetAudioStream` carries no
-authorization attribute in `v12.0-rc7` either -- and the 10.11 line is dead:
-`release-10.11.z` has had no commit since `v10.11.11` (2026-06-06). Nothing arrives
-for free, so the maintenance model has to be cheap to run indefinitely.
+authorization attribute in `v12.0` either (verified in the release source, not the
+issue tracker) -- and the 10.11 line is dead: `release-10.11.z` had no commit between
+`v10.11.11` (2026-06-06) and 12.0 superseding it. Nothing arrives for free, so the
+maintenance model has to be cheap to run indefinitely.
 
 **The source of truth is a commit series, not the patch files.**
 
-    ~/src/jellyfin   branch patched/10.11.11 = v10.11.11 + one commit per change
+    ~/src/jellyfin   branch patched/12.0 = v12.0 + one commit per change
     patches/         GENERATED from it by tools/regen-patches.sh -- never hand-edited
+
+    (patched/10.11.11 is the ARCHIVED previous series; tag v10.11.11-p5 still
+     rebuilds that image exactly, but new work does not land there.)
 
 Everything follows from that:
 
 - **Conflicts localize.** A base bump used to conflict as one 39 KB patch spanning 13
-  files. Now `tools/port-check.py` names the individual commits: against `v12.0-rc7`,
-  three of six port cleanly and three need hand work, and it says which files.
+  files. Now `tools/port-check.py` names the individual commits and the files each
+  one conflicts in.
 - **A base bump is one rebase**, with `rerere` on so each conflict is resolved once
-  and replayed forever: `git rebase --onto v12.0 v10.11.11 patched/10.11.11`.
+  and replayed forever. The 10.11.11 -> 12.0 bump is what this bought: rerere replayed
+  the banked MediaInfoHelper resolution and the four commits landed with **no manual
+  conflict resolution at all**. Use the series' actual base as the upstream ref
+  (`git rebase --onto <new> <current base> <series>`), never an older one.
 - **Backports are ordinary commits.** An upstream fix worth taking is cherry-picked
   with `-x`, which records the upstream sha, so `port-check` can later say *drop this,
   the new base already has it* instead of letting it conflict as a duplicate.
@@ -161,15 +168,15 @@ half of the fix silently absent.
 
 ## Building
 
-Needs the **.NET 9** SDK (10.11.x pins `rollForward: latestMinor`, so a 10.x SDK
-will not do). Only the assemblies the patch set actually touches are replaced -- the
+Needs the **.NET 10** SDK (12.0 pins `sdk 10.0.0` with `rollForward: latestMinor`;
+the archived 10.11.11 series needs .NET 9 instead). Only the assemblies the patch set actually touches are replaced -- the
 set is **derived from the patches**, not hand-listed -- and jellyfin-web, ffmpeg, s6
 and the volume layout all come from the stock LinuxServer image untouched. A patched
 file that maps to no shippable assembly fails the build rather than being dropped.
 
     ./build/build.sh
 
-Building from the `v10.11.11` **tag** keeps `AssemblyVersion("10.11.11")`, which the
+Building from the `v12.0` **tag** keeps the base's `AssemblyVersion`, which the
 overlay requires anyway: the image is a closed binding graph, so every assembly we
 emit must match what the base image ships. ABI-pinned plugins get that for free as a
 side effect — but no plugin gates the base version. Building from `master` would not work: it is 2000+ commits
@@ -183,11 +190,11 @@ proves the source was patched; only this proves the image was.
 
 The script builds and tags an image. It does **not** touch the running container.
 Switching is a separate, explicit step, and rolling back is repointing the tag at
-`lscr.io/linuxserver/jellyfin:10.11.11ubu2604-ls43`.
+`lscr.io/linuxserver/jellyfin:12.0ubu2604-ls48`.
 
 ## Releases, versions and the changelog
 
-**Version = `<upstream base>-p<N>`**, in the `VERSION` file — `10.11.11-p1`. The base is
+**Version = `<upstream base>-p<N>`**, in the `VERSION` file — `12.0-p1`. The base is
 what we build from; `N` counts releases of the fork on that base and resets when the base
 moves. `build.sh`, `tools/release.py` and the watcher all read that one file.
 
@@ -201,7 +208,7 @@ it was rebuilt underneath it, so a restart for any unrelated reason would have s
 adopted four commits of change. Deployment is now an explicit edit:
 
     # ~/media/docker-compose.yml
-    image: jellyfin-patched:10.11.11-p1
+    image: jellyfin-patched:12.0-p1
 
     docker compose -f ~/media/docker-compose.yml up -d --no-deps jellyfin
 
@@ -233,12 +240,12 @@ assemblies replaced. That is what makes a release rebuildable and a rollback inf
 
 `jellyfin-patched` is built locally and used to exist in **no registry at all**, so a
 `docker image prune -a` or a stray `compose pull` left rebuild-from-source as the only
-recovery — on a box that needs the .NET 9 SDK to do it. `tools/push-image.sh` publishes
+recovery — on a box that needs the .NET 10 SDK to do it. `tools/push-image.sh` publishes
 the built tag to `ghcr.io/sinful1992/jellyfin-patched`, and `release.py --publish` calls
 it after the GitHub release. A failed push warns but never unpublishes the release.
 
     tools/push-image.sh                 # pushes the version in VERSION
-    docker pull ghcr.io/sinful1992/jellyfin-patched:10.11.11-p1   # recovery
+    docker pull ghcr.io/sinful1992/jellyfin-patched:12.0-p1   # recovery
 
 It needs `write:packages`, which a default `gh` login does not carry:
 
@@ -279,9 +286,12 @@ It reports:
   The verdict is posted only when it *changes*, so a standing set of conflicts does
   not become daily noise. `$SRC_DIR`'s working tree is never disturbed.
 - upstream commits touching any file our patches touch, on **both `master` and
-  `release-10.11.z`** (a rebase will conflict, or upstream fixed it and a patch can be
-  dropped). The release branch matters most: a 10.11.z security backport lands there,
+  `release-12.z`** (a rebase will conflict, or upstream fixed it and a patch can be
+  dropped). The release branch matters most: a 12.z security backport lands there,
   and the GitHub commits API only looks at the default branch unless told otherwise.
+- **it does NOT watch base images.** The checks are GitHub releases/commits/issues
+  plus a local `docker image inspect`; nothing polls Docker Hub. The LinuxServer 12.0
+  release-tag image, which unblocked this whole bump, had to be found by hand.
 - any of the six tracked issues closing upstream (our patch may be redundant)
 - Intro Skipper releases -- **informational only**. It is a nice-to-have plugin and
   does not gate a base bump, a feature, or an update; it is reported so a bump can

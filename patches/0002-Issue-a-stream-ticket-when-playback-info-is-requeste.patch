@@ -7,11 +7,12 @@ PlaybackInfo is authenticated, so it is the point where a client has proved who
 it is. Minting the ticket here is what lets the stream endpoints below stay
 reachable to the clients that cannot send credentials.
 ---
- Jellyfin.Api/Helpers/MediaInfoHelper.cs | 53 ++++++++++++++++++++++++-
- 1 file changed, 52 insertions(+), 1 deletion(-)
+ Jellyfin.Api/Helpers/MediaInfoHelper.cs       | 53 ++++++++++++++++++-
+ .../Helpers/MediaInfoHelperTests.cs           |  5 +-
+ 2 files changed, 56 insertions(+), 2 deletions(-)
 
 diff --git a/Jellyfin.Api/Helpers/MediaInfoHelper.cs b/Jellyfin.Api/Helpers/MediaInfoHelper.cs
-index 454d3f08e3..1872a6f353 100644
+index c27a18831c..1ba3257a36 100644
 --- a/Jellyfin.Api/Helpers/MediaInfoHelper.cs
 +++ b/Jellyfin.Api/Helpers/MediaInfoHelper.cs
 @@ -1,4 +1,5 @@
@@ -28,51 +29,55 @@ index 454d3f08e3..1872a6f353 100644
  using Jellyfin.Api.Extensions;
  using Jellyfin.Data;
  using Jellyfin.Data.Enums;
-@@ -44,6 +46,8 @@ public class MediaInfoHelper
-     private readonly ILogger<MediaInfoHelper> _logger;
+@@ -46,6 +48,8 @@ public class MediaInfoHelper
      private readonly INetworkManager _networkManager;
      private readonly IDeviceManager _deviceManager;
+     private readonly IServerApplicationHost _appHost;
 +    private readonly IHttpContextAccessor _httpContextAccessor;
 +    private readonly IStreamTicketStore _ticketStore;
  
      /// <summary>
      /// Initializes a new instance of the <see cref="MediaInfoHelper"/> class.
-@@ -56,6 +60,8 @@ public class MediaInfoHelper
-     /// <param name="logger">Instance of the <see cref="ILogger{MediaInfoHelper}"/> interface.</param>
+@@ -59,6 +63,8 @@ public class MediaInfoHelper
      /// <param name="networkManager">Instance of the <see cref="INetworkManager"/> interface.</param>
      /// <param name="deviceManager">Instance of the <see cref="IDeviceManager"/> interface.</param>
+     /// <param name="appHost">Instance of the <see cref="IServerApplicationHost"/> interface.</param>
 +    /// <param name="httpContextAccessor">Instance of the <see cref="IHttpContextAccessor"/> interface.</param>
 +    /// <param name="ticketStore">Instance of the <see cref="IStreamTicketStore"/> interface.</param>
      public MediaInfoHelper(
          IUserManager userManager,
          ILibraryManager libraryManager,
-@@ -64,7 +70,9 @@ public class MediaInfoHelper
-         IServerConfigurationManager serverConfigurationManager,
+@@ -68,7 +74,9 @@ public class MediaInfoHelper
          ILogger<MediaInfoHelper> logger,
          INetworkManager networkManager,
--        IDeviceManager deviceManager)
-+        IDeviceManager deviceManager,
+         IDeviceManager deviceManager,
+-        IServerApplicationHost appHost)
++        IServerApplicationHost appHost,
 +        IHttpContextAccessor httpContextAccessor,
 +        IStreamTicketStore ticketStore)
      {
          _userManager = userManager;
          _libraryManager = libraryManager;
-@@ -74,6 +82,8 @@ public class MediaInfoHelper
-         _logger = logger;
+@@ -79,6 +87,8 @@ public class MediaInfoHelper
          _networkManager = networkManager;
          _deviceManager = deviceManager;
+         _appHost = appHost;
 +        _httpContextAccessor = httpContextAccessor;
 +        _ticketStore = ticketStore;
      }
  
      /// <summary>
-@@ -142,9 +152,50 @@ public class MediaInfoHelper
+@@ -132,6 +142,8 @@ public class MediaInfoHelper
              result.PlaySessionId = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
          }
  
 +        IssueStreamTickets(item, result);
 +
          return result;
+     }
+ 
+@@ -157,6 +169,45 @@ public class MediaInfoHelper
+             .ToArray();
      }
  
 +    /// <summary>
@@ -117,3 +122,26 @@ index 454d3f08e3..1872a6f353 100644
      /// <summary>
      /// SetDeviceSpecificData.
      /// </summary>
+diff --git a/tests/Jellyfin.Api.Tests/Helpers/MediaInfoHelperTests.cs b/tests/Jellyfin.Api.Tests/Helpers/MediaInfoHelperTests.cs
+index fe824eddd9..704a8e2e73 100644
+--- a/tests/Jellyfin.Api.Tests/Helpers/MediaInfoHelperTests.cs
++++ b/tests/Jellyfin.Api.Tests/Helpers/MediaInfoHelperTests.cs
+@@ -3,6 +3,7 @@ using System.Globalization;
+ using System.Text.Json;
+ using System.Threading;
+ using System.Threading.Tasks;
++using Jellyfin.Api.Auth.StreamAccessPolicy;
+ using Jellyfin.Api.Helpers;
+ using Jellyfin.Database.Implementations.Entities;
+ using MediaBrowser.Common.Net;
+@@ -45,7 +46,9 @@ namespace Jellyfin.Api.Tests.Helpers
+                 Mock.Of<ILogger<MediaInfoHelper>>(),
+                 Mock.Of<INetworkManager>(),
+                 Mock.Of<IDeviceManager>(),
+-                appHost ?? Mock.Of<IServerApplicationHost>());
++                appHost ?? Mock.Of<IServerApplicationHost>(),
++                Mock.Of<IHttpContextAccessor>(),
++                Mock.Of<IStreamTicketStore>());
+         }
+ 
+         private static MediaSourceInfo CreateSource(Guid itemId, int bitrate, bool supportsDirectPlay = true)

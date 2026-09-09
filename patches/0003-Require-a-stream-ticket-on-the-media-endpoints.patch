@@ -20,7 +20,7 @@ clients the comment was protecting.
  6 files changed, 26 insertions(+), 4 deletions(-)
 
 diff --git a/Jellyfin.Api/Controllers/AudioController.cs b/Jellyfin.Api/Controllers/AudioController.cs
-index 552030e9e3..73f457ddbf 100644
+index 77bb6ee7e7..b6511ecf08 100644
 --- a/Jellyfin.Api/Controllers/AudioController.cs
 +++ b/Jellyfin.Api/Controllers/AudioController.cs
 @@ -3,11 +3,14 @@ using System.Collections.Generic;
@@ -38,7 +38,7 @@ index 552030e9e3..73f457ddbf 100644
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  
-@@ -86,6 +89,7 @@ public class AudioController : BaseJellyfinApiController
+@@ -85,6 +88,7 @@ public class AudioController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Audio stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
@@ -46,7 +46,7 @@ index 552030e9e3..73f457ddbf 100644
      [HttpGet("{itemId}/stream", Name = "GetAudioStream")]
      [HttpHead("{itemId}/stream", Name = "HeadAudioStream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
-@@ -253,6 +257,7 @@ public class AudioController : BaseJellyfinApiController
+@@ -249,6 +253,7 @@ public class AudioController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Audio stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
@@ -55,7 +55,7 @@ index 552030e9e3..73f457ddbf 100644
      [HttpHead("{itemId}/stream.{container}", Name = "HeadAudioStreamByContainer")]
      [ProducesResponseType(StatusCodes.Status200OK)]
 diff --git a/Jellyfin.Api/Controllers/HlsSegmentController.cs b/Jellyfin.Api/Controllers/HlsSegmentController.cs
-index 1927a332b2..a0ab4c5737 100644
+index c61ee45830..773e7078c3 100644
 --- a/Jellyfin.Api/Controllers/HlsSegmentController.cs
 +++ b/Jellyfin.Api/Controllers/HlsSegmentController.cs
 @@ -4,7 +4,9 @@ using System.Diagnostics.CodeAnalysis;
@@ -68,7 +68,7 @@ index 1927a332b2..a0ab4c5737 100644
  using MediaBrowser.Common.Configuration;
  using MediaBrowser.Controller.Configuration;
  using MediaBrowser.Controller.MediaEncoding;
-@@ -49,8 +51,7 @@ public class HlsSegmentController : BaseJellyfinApiController
+@@ -50,8 +52,7 @@ public class HlsSegmentController : BaseJellyfinApiController
      /// <param name="segmentId">The segment id.</param>
      /// <response code="200">Hls audio segment returned.</response>
      /// <returns>A <see cref="FileStreamResult"/> containing the audio stream.</returns>
@@ -78,7 +78,7 @@ index 1927a332b2..a0ab4c5737 100644
      [HttpGet("Audio/{itemId}/hls/{segmentId}/stream.mp3", Name = "GetHlsAudioSegmentLegacyMp3")]
      [HttpGet("Audio/{itemId}/hls/{segmentId}/stream.aac", Name = "GetHlsAudioSegmentLegacyAac")]
      [ProducesResponseType(StatusCodes.Status200OK)]
-@@ -126,8 +127,7 @@ public class HlsSegmentController : BaseJellyfinApiController
+@@ -121,8 +122,7 @@ public class HlsSegmentController : BaseJellyfinApiController
      /// <response code="200">Hls video segment returned.</response>
      /// <response code="404">Hls segment not found.</response>
      /// <returns>A <see cref="FileStreamResult"/> containing the video segment.</returns>
@@ -89,10 +89,10 @@ index 1927a332b2..a0ab4c5737 100644
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
 diff --git a/Jellyfin.Api/Controllers/LiveTvController.cs b/Jellyfin.Api/Controllers/LiveTvController.cs
-index 77e3e301a6..3fd338e577 100644
+index 1c570daf21..58164fec82 100644
 --- a/Jellyfin.Api/Controllers/LiveTvController.cs
 +++ b/Jellyfin.Api/Controllers/LiveTvController.cs
-@@ -1159,6 +1159,12 @@ public class LiveTvController : BaseJellyfinApiController
+@@ -1115,6 +1115,12 @@ public class LiveTvController : BaseJellyfinApiController
      /// An <see cref="OkResult"/> containing the recording stream on success,
      /// or a <see cref="NotFoundResult"/> if recording not found.
      /// </returns>
@@ -105,7 +105,7 @@ index 77e3e301a6..3fd338e577 100644
      [HttpGet("LiveRecordings/{recordingId}/stream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
-@@ -1186,6 +1192,7 @@ public class LiveTvController : BaseJellyfinApiController
+@@ -1142,6 +1148,7 @@ public class LiveTvController : BaseJellyfinApiController
      /// An <see cref="OkResult"/> containing the channel stream on success,
      /// or a <see cref="NotFoundResult"/> if stream not found.
      /// </returns>
@@ -114,7 +114,7 @@ index 77e3e301a6..3fd338e577 100644
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesResponseType(StatusCodes.Status404NotFound)]
 diff --git a/Jellyfin.Api/Controllers/SubtitleController.cs b/Jellyfin.Api/Controllers/SubtitleController.cs
-index e5df873f5b..a30e2bc6d3 100644
+index c4851091c1..0f97187f04 100644
 --- a/Jellyfin.Api/Controllers/SubtitleController.cs
 +++ b/Jellyfin.Api/Controllers/SubtitleController.cs
 @@ -11,6 +11,7 @@ using System.Text;
@@ -142,7 +142,7 @@ index e5df873f5b..a30e2bc6d3 100644
      [ProducesResponseType(StatusCodes.Status200OK)]
      [ProducesFile("text/*")]
 diff --git a/Jellyfin.Api/Controllers/VideoAttachmentsController.cs b/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
-index b67c6fdb7b..32ffb0302b 100644
+index 2c8b452c35..f1be4973d3 100644
 --- a/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
 +++ b/Jellyfin.Api/Controllers/VideoAttachmentsController.cs
 @@ -4,12 +4,15 @@ using System.Net.Mime;
@@ -161,7 +161,7 @@ index b67c6fdb7b..32ffb0302b 100644
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  
-@@ -46,6 +49,7 @@ public class VideoAttachmentsController : BaseJellyfinApiController
+@@ -47,6 +50,7 @@ public class VideoAttachmentsController : BaseJellyfinApiController
      /// <response code="200">Attachment retrieved.</response>
      /// <response code="404">Video or attachment not found.</response>
      /// <returns>An <see cref="FileStreamResult"/> containing the attachment stream on success, or a <see cref="NotFoundResult"/> if the attachment could not be found.</returns>
@@ -170,7 +170,7 @@ index b67c6fdb7b..32ffb0302b 100644
      [ProducesFile(MediaTypeNames.Application.Octet)]
      [ProducesResponseType(StatusCodes.Status200OK)]
 diff --git a/Jellyfin.Api/Controllers/VideosController.cs b/Jellyfin.Api/Controllers/VideosController.cs
-index 447f71bd96..0e8018fa3e 100644
+index 29a92cdb90..5b4d0fc9ee 100644
 --- a/Jellyfin.Api/Controllers/VideosController.cs
 +++ b/Jellyfin.Api/Controllers/VideosController.cs
 @@ -7,6 +7,7 @@ using System.Net.Http;
@@ -181,7 +181,7 @@ index 447f71bd96..0e8018fa3e 100644
  using Jellyfin.Api.Extensions;
  using Jellyfin.Api.Helpers;
  using Jellyfin.Api.ModelBinders;
-@@ -309,6 +310,7 @@ public class VideosController : BaseJellyfinApiController
+@@ -311,6 +312,7 @@ public class VideosController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Video stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>
@@ -189,7 +189,7 @@ index 447f71bd96..0e8018fa3e 100644
      [HttpGet("{itemId}/stream")]
      [HttpHead("{itemId}/stream", Name = "HeadVideoStream")]
      [ProducesResponseType(StatusCodes.Status200OK)]
-@@ -550,6 +552,7 @@ public class VideosController : BaseJellyfinApiController
+@@ -549,6 +551,7 @@ public class VideosController : BaseJellyfinApiController
      /// <param name="enableAudioVbrEncoding">Optional. Whether to enable Audio Encoding.</param>
      /// <response code="200">Video stream returned.</response>
      /// <returns>A <see cref="FileResult"/> containing the audio file.</returns>

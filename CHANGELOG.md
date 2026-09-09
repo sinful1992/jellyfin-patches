@@ -3,6 +3,60 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.0-p1 — 2026-09-09
+
+Base `v12.0` · image `jellyfin-patched:12.0-p1`
+Built on `lscr.io/linuxserver/jellyfin:12.0ubu2604-ls48@sha256:0f42497a69fa0441bfd5f9d6bba8694f2a656ec984e571d0ac04c6dd91250039`
+
+**Base bump: 10.11.11 → 12.0, and the series moves with it.** `patched/12.0` is now the
+source of truth; `patched/10.11.11` is archived and still rebuildable from tag
+`v10.11.11-p5`. Upstream cut `v12.0` on 2026-09-08 and LinuxServer published a
+release-tag image the same day, which removed the last two blockers.
+
+The series is **4 commits, down from 6**:
+
+- **Dropped** `Backport: fix PGS subtitles for BDMV with TrueHD` — upstream `7c463f5fb`
+  is in `v12.0`, so the base now carries it.
+- **Not ported** `Read user data from the cache and database, never the item snapshot`.
+  Upstream restructured the code it targets; the patch has no target at 12.0.
+  **This image therefore lacks a fix that was live in 10.11.11-p5.** Whether the
+  favourites-revert defect still occurs at 12.0 is UNANSWERED — it needs a
+  reproduction on a running 12.0. Do not re-derive the fix blind.
+
+The rebase itself needed **no manual conflict resolution**: `rerere` replayed the banked
+MediaInfoHelper resolution, and dropping the BDMV commit took the SubtitleEncoder
+conflict with it.
+
+<details><summary>Contains 4 change(s)</summary>
+
+- Add a stream-ticket authorization policy
+- Issue a stream ticket when playback info is requested
+- Require a stream ticket on the media endpoints
+- Add regression tests for media endpoint authentication
+
+</details>
+
+### Verified
+- `dotnet build Jellyfin.Server -c Release` on **.NET 10** — 0 warnings, 0 errors
+- `Jellyfin.Api.Tests` — **145 passed, 0 failed**, including `StreamAccessHandlerTests`
+- version gate: base ships `Jellyfin.Api` at `26.4.0.0`, matched
+- smoke test: video / audio / HLS unauthenticated endpoints all **401**
+
+**Scope of that smoke test:** it starts a throwaway container, drives the startup wizard
+and checks the three unauthenticated media endpoints. It does **not** cover database
+migration, transcoding, subtitle extraction or playback. The functional test recorded in
+`notes/12.0-port.md` covered those, but against **rc7 on the nightly base** — a different
+pairing from what is built here. Re-run it against this image before deploying.
+
+### Tooling
+- Watcher rebaselined to 12.0: `PINNED`, `SERIES`, and `release-10.11.z` → `release-12.z`
+- Watcher no longer port-checks **backwards** against a base already contained in the
+  pinned tag, and skips a target tag that does not resolve
+- Documented that the watcher does **not** watch base images — the LinuxServer 12.0
+  release tag that unblocked this bump had to be found by hand
+
+Assemblies replaced: Emby.Server.Implementations.dll, Jellyfin.Api.dll
+
 ## 10.11.11-p5 — 2026-09-07
 
 Base `v10.11.11` · image `jellyfin-patched:10.11.11-p5`

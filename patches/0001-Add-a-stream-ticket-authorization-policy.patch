@@ -26,18 +26,18 @@ build already replaces.
  create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
 
 diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
-index cbb0f6c565..81d10b52c8 100644
+index 1a54565863..2cb119b87f 100644
 --- a/Emby.Server.Implementations/ApplicationHost.cs
 +++ b/Emby.Server.Implementations/ApplicationHost.cs
-@@ -35,6 +35,7 @@ using Emby.Server.Implementations.Session;
+@@ -38,6 +38,7 @@ using Emby.Server.Implementations.Session;
  using Emby.Server.Implementations.SyncPlay;
  using Emby.Server.Implementations.TV;
  using Emby.Server.Implementations.Updates;
 +using Jellyfin.Api.Auth.StreamAccessPolicy;
  using Jellyfin.Api.Helpers;
- using Jellyfin.Drawing;
- using Jellyfin.MediaEncoding.Hls.Playlist;
-@@ -98,6 +99,7 @@ using MediaBrowser.XbmcMetadata.Providers;
+ using Jellyfin.Data;
+ using Jellyfin.Database.Implementations.Enums;
+@@ -110,6 +111,7 @@ using MediaBrowser.XbmcMetadata.Providers;
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  using Microsoft.Extensions.Configuration;
@@ -45,7 +45,7 @@ index cbb0f6c565..81d10b52c8 100644
  using Microsoft.Extensions.DependencyInjection;
  using Microsoft.Extensions.Logging;
  using Prometheus.DotNetRuntime;
-@@ -574,6 +576,21 @@ namespace Emby.Server.Implementations
+@@ -629,6 +631,21 @@ namespace Emby.Server.Implementations
  
              serviceCollection.AddSingleton<ITranscodeManager, TranscodeManager>();
              serviceCollection.AddScoped<MediaInfoHelper>();

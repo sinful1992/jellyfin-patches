@@ -46,15 +46,21 @@ fi
 # not describe, and every later rebase would silently discard the edit.
 if echo "$ships" | grep -q '^patches/'; then
   src="${SRC_DIR:-$HOME/src/jellyfin}"
-  series="${SERIES:-patched/10.11.11}"
+  # Both derived from VERSION, so a base bump rebaselines this hook automatically.
+  # Hardcoding the series meant the 10.11.11 -> 12.0 bump was refused by its own hook.
   base="${BASE_TAG:-v$(echo "$version" | sed 's/-p[0-9]*$//')}"
+  series="${SERIES:-patched/$(echo "$version" | sed 's/-p[0-9]*$//')}"
   if git -C "$src" rev-parse --verify --quiet "$series" >/dev/null 2>&1; then
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
     git -C "$src" format-patch --quiet --no-signature --zero-commit --no-numbered \
       -o "$tmp" "$base..$series" >/dev/null 2>&1 || true
     staged_dir="$(mktemp -d)"; trap 'rm -rf "$tmp" "$staged_dir"' EXIT
-    git show :patches 2>/dev/null >/dev/null || true
-    for f in $(git diff --cached --name-only --diff-filter=ACM -- patches); do
+    # Materialise the WHOLE staged patches/ tree, not just the files this commit
+    # touches. Comparing only the changed ones false-refuses whenever a patch
+    # regenerates byte-identical: the 10.11.11 -> 12.0 bump left 0004 unchanged, so
+    # the comparison saw 3 files against a freshly generated 4 and called it a
+    # mismatch. The index is the thing that has to match the series, not the delta.
+    for f in $(git ls-files --cached -- patches); do
       mkdir -p "$staged_dir/$(dirname "$f")"; git show ":$f" > "$staged_dir/$f"
     done
     if ! diff -rq "$tmp" "$staged_dir/patches" >/dev/null 2>&1; then
