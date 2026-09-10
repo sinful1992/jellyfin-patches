@@ -198,6 +198,45 @@ def check_issues(state, findings):
         time.sleep(1)
 
 
+def _ver(s):
+    """Sortable tuple from a plugin version. Non-numeric parts sort as 0, which is
+    fine: the plugin's own versions are numeric, and a weird one must not crash a
+    check that gates nothing."""
+    return tuple(int(x) if x.isdigit() else 0 for x in s.lstrip("v").split("."))
+
+
+def _installed_intro_skipper():
+    """What the `jellyfin` container actually HAS, or None if it cannot be read.
+
+    Read from the host side of the /config bind mount, not `docker exec`: it works
+    with the container stopped, and the point is to compare upstream against reality
+    instead of against what this script happened to remember last. 12.0 keeps plugins
+    in `data/plugins`; older layouts used `plugins`.
+    """
+    r = _run(["docker", "inspect", "--format",
+              '{{range .Mounts}}{{.Destination}}\t{{.Source}}\n{{end}}', "jellyfin"], timeout=60)
+    if r.returncode != 0:
+        return None
+    config = next((ln.split("\t", 1)[1] for ln in r.stdout.splitlines()
+                   if ln.startswith("/config\t")), None)
+    if not config:
+        return None
+    best = None
+    for plugins in (Path(config) / "data/plugins", Path(config) / "plugins"):
+        try:
+            names = [d.name for d in plugins.iterdir() if d.is_dir()]
+        except OSError:
+            continue
+        for name in names:
+            # Jellyfin names the directory "<Plugin Name>_<version>" and can keep
+            # several versions side by side; the highest is the one it loads.
+            if name.lower().startswith("intro skipper_"):
+                v = name.split("_", 1)[1]
+                if best is None or _ver(v) > _ver(best):
+                    best = v
+    return best
+
+
 def check_intro_skipper(state, findings):
     """Track the release line for OUR server major, not whatever published last.
 
@@ -234,13 +273,38 @@ def check_intro_skipper(state, findings):
     # independently, so list order tells you about the other line as often as ours.
     rel = max(ours, key=lambda r: r["published_at"] or "")
     tag = rel["tag_name"]
-    if tag != state.get("last_intro_skipper"):
-        if state.get("last_intro_skipper"):
+    newest = tag.split("/", 1)[-1].lstrip("v")
+    state["last_intro_skipper"] = tag
+
+    installed = _installed_intro_skipper()
+    if installed is None:
+        # Degraded, and saying so. Without the installed version this is back to
+        # comparing upstream against this script's own memory, which cannot notice a
+        # plugin that was simply never upgraded.
+        if state.get("last_intro_skipper_gap") != "unknown":
             findings.append(
-                f"**Intro Skipper {tag}** released -- the `{INTRO_SKIPPER_LINE}` line, ours\n"
+                f"**Cannot read the installed Intro Skipper version** -- no readable "
+                f"`/config` mount or plugin directory for container `jellyfin`, so the "
+                f"newest build on the `{INTRO_SKIPPER_LINE}` line ({newest}) cannot be "
+                f"compared against what is running. FYI only; it gates nothing.")
+        state["last_intro_skipper_gap"] = "unknown"
+        return
+
+    # Keyed on the PAIR, so it posts once per real gap rather than daily, and posts
+    # again on its own if either side moves. Nothing to reset by hand.
+    gap = f"{installed}->{newest}" if _ver(newest) > _ver(installed) else ""
+    if gap != state.get("last_intro_skipper_gap"):
+        if gap:
+            findings.append(
+                f"**Intro Skipper {newest} is out -- `jellyfin` has {installed}** "
+                f"(the `{INTRO_SKIPPER_LINE}` line, ours)\n"
                 f"FYI only -- it is a nice-to-have, not a gate on anything. Reported so a "
                 f"base bump can pick up a matching build if one exists.\n{rel['html_url']}")
-        state["last_intro_skipper"] = tag
+        elif state.get("last_intro_skipper_gap") not in (None, "", "unknown"):
+            findings.append(
+                f"**Intro Skipper is current again** -- nothing newer than {installed} "
+                f"on the `{INTRO_SKIPPER_LINE}` line")
+    state["last_intro_skipper_gap"] = gap
 
 
 def _run(cmd, cwd=None, timeout=900):

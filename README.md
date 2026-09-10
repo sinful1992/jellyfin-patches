@@ -293,15 +293,20 @@ It reports:
   plus a local `docker image inspect`; nothing polls Docker Hub. The LinuxServer 12.0
   release-tag image, which unblocked this whole bump, had to be found by hand.
 - any of the six tracked issues closing upstream (our patch may be redundant)
-- Intro Skipper releases **on our own line only** -- the plugin keeps one release
-  line per server major (`12.0/v12.0.3.0`, `10.11/v1.10.11.24`), and
-  `/releases/latest` returns the newest publish across all of them. It announced a
-  10.11 build to a 12.0 server on 2026-09-10 and said nothing about `12.0/v12.0.3.0`,
-  which had landed five minutes earlier; the check now filters to the line named by
-  `PINNED`, and says so out loud when that line has no build yet instead of going
-  quiet. Either way it is **informational only**: a nice-to-have plugin that does not
-  gate a base bump, a feature, or an update, reported so a bump can bring a matching
-  build along if one exists.
+- Intro Skipper, compared **against the version actually installed**, on **our own
+  release line only**. The plugin keeps one line per server major (`12.0/v12.0.3.0`,
+  `10.11/v1.10.11.24`) and `/releases/latest` returns the newest publish across all
+  of them: on 2026-09-10 it announced a 10.11 build to a 12.0 server and said nothing
+  about `12.0/v12.0.3.0`, which had landed five minutes earlier. The check now filters
+  to the line named by `PINNED` and diffs it against the plugin directory under the
+  container's `/config` mount, so "we never upgraded it" is visible and the report
+  cannot be silenced by its own memory of a tag. It is keyed on the
+  installed-vs-newest pair, so it posts once per real gap, again by itself if either
+  side moves, and once when the gap closes. It says so out loud when the line has no
+  build yet, or when the installed version cannot be read, instead of going quiet.
+  All of it is **informational only**: a nice-to-have plugin that does not gate a base
+  bump, a feature, or an update, reported so a bump can bring a matching build along
+  if one exists.
 - **local drift** -- that `jellyfin-patched` still exists and is what the `jellyfin`
   container is actually running. The image is built locally and exists in no registry,
   so `docker image prune -a` or a stray `compose pull` can put the stock image back
