@@ -20,6 +20,9 @@ from pathlib import Path
 
 BOT = "Bloodhound"
 PINNED = "12.0"                           # the server release we build from
+# The plugin names its release lines after the server major ("12.0/v12.0.3.0"), so
+# this follows PINNED and rebaselines itself at a base bump.
+INTRO_SKIPPER_LINE = os.environ.get("JF_INTRO_SKIPPER_LINE", PINNED)
 STATE = Path(os.environ.get("JF_WATCH_STATE", Path.home() / ".local/state/jellyfin-watch/state.json"))
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
@@ -196,15 +199,45 @@ def check_issues(state, findings):
 
 
 def check_intro_skipper(state, findings):
-    try:
-        rel = get("https://api.github.com/repos/intro-skipper/intro-skipper/releases/latest")
-    except urllib.error.HTTPError:
+    """Track the release line for OUR server major, not whatever published last.
+
+    The plugin keeps one line per server major -- tags read "12.0/v12.0.3.0" and
+    "10.11/v1.10.11.24" -- and /releases/latest returns the newest publish ACROSS
+    lines. On 2026-09-10 that announced a 10.11 build, published five minutes later,
+    to a server that had moved to 12.0 the day before, while 12.0/v12.0.3.0 went
+    unreported and the stored tag regressed to the abandoned line. Same shape as
+    /releases/latest hiding the prereleases: a check that passes while the thing it
+    watches has moved on.
+    """
+    # No try/except around this: an HTTPError here (a rate-limit 403, a moved repo)
+    # used to return quietly, so the check could be dead for months and look calm.
+    # main() turns the exception into a loud ":warning: check failed" instead.
+    rels = get("https://api.github.com/repos/intro-skipper/intro-skipper/releases?per_page=100")
+    prefix = INTRO_SKIPPER_LINE + "/"
+    ours = [r for r in rels
+            if r["tag_name"].startswith(prefix) and not r["prerelease"] and not r["draft"]]
+
+    if not ours:
+        # Say it out loud rather than going quiet. Right after a base bump the plugin
+        # may have no build for our line yet, and silence there is indistinguishable
+        # from "up to date" -- which is the failure this whole watcher exists to avoid.
+        none_yet = f"(no {INTRO_SKIPPER_LINE} release)"
+        if state.get("last_intro_skipper") != none_yet:
+            findings.append(
+                f"**No Intro Skipper release for the `{INTRO_SKIPPER_LINE}` line** yet\n"
+                f"FYI only -- it gates nothing. Reported because this check would "
+                f"otherwise be silent, which reads exactly like up to date.")
+            state["last_intro_skipper"] = none_yet
         return
+
+    # Newest by published_at, not by list position: the lines are published
+    # independently, so list order tells you about the other line as often as ours.
+    rel = max(ours, key=lambda r: r["published_at"] or "")
     tag = rel["tag_name"]
     if tag != state.get("last_intro_skipper"):
         if state.get("last_intro_skipper"):
             findings.append(
-                f"**Intro Skipper {tag}** released\n"
+                f"**Intro Skipper {tag}** released -- the `{INTRO_SKIPPER_LINE}` line, ours\n"
                 f"FYI only -- it is a nice-to-have, not a gate on anything. Reported so a "
                 f"base bump can pick up a matching build if one exists.\n{rel['html_url']}")
         state["last_intro_skipper"] = tag

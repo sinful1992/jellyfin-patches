@@ -293,9 +293,15 @@ It reports:
   plus a local `docker image inspect`; nothing polls Docker Hub. The LinuxServer 12.0
   release-tag image, which unblocked this whole bump, had to be found by hand.
 - any of the six tracked issues closing upstream (our patch may be redundant)
-- Intro Skipper releases -- **informational only**. It is a nice-to-have plugin and
-  does not gate a base bump, a feature, or an update; it is reported so a bump can
-  bring a matching build along if one exists.
+- Intro Skipper releases **on our own line only** -- the plugin keeps one release
+  line per server major (`12.0/v12.0.3.0`, `10.11/v1.10.11.24`), and
+  `/releases/latest` returns the newest publish across all of them. It announced a
+  10.11 build to a 12.0 server on 2026-09-10 and said nothing about `12.0/v12.0.3.0`,
+  which had landed five minutes earlier; the check now filters to the line named by
+  `PINNED`, and says so out loud when that line has no build yet instead of going
+  quiet. Either way it is **informational only**: a nice-to-have plugin that does not
+  gate a base bump, a feature, or an update, reported so a bump can bring a matching
+  build along if one exists.
 - **local drift** -- that `jellyfin-patched` still exists and is what the `jellyfin`
   container is actually running. The image is built locally and exists in no registry,
   so `docker image prune -a` or a stray `compose pull` can put the stock image back
