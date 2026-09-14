@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BOT = "Bloodhound"
@@ -70,16 +70,55 @@ PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patche
 
 # Files our patches touch. An upstream commit here means a rebase may conflict,
 # or that upstream fixed it themselves and we can drop a patch.
-WATCHED_PATHS = [
+#
+# DERIVED from the series, like ASSEMBLIES in build.sh: a hand-kept list drifted
+# at the 12.0 port -- it still watched the 10.11-era UserDataManager/DtoService/
+# EncodingHelper and never watched MediaInfoHelper, ApplicationHost or
+# LiveTvController, which is where the 12.0 series actually lives. Files the
+# series ADDS are skipped: nothing upstream can conflict with a file it lacks.
+# Tests are skipped: they cannot conflict with a base bump in a way that matters.
+FALLBACK_PATHS = [
+    "Emby.Server.Implementations/ApplicationHost.cs",
     "Jellyfin.Api/Controllers/AudioController.cs",
-    "Jellyfin.Api/Controllers/VideosController.cs",
-    "Jellyfin.Api/Controllers/VideoAttachmentsController.cs",
-    "Jellyfin.Api/Controllers/SubtitleController.cs",
     "Jellyfin.Api/Controllers/HlsSegmentController.cs",
-    "Emby.Server.Implementations/Library/UserDataManager.cs",
-    "Emby.Server.Implementations/Dto/DtoService.cs",
-    "MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs",
+    "Jellyfin.Api/Controllers/LiveTvController.cs",
+    "Jellyfin.Api/Controllers/SubtitleController.cs",
+    "Jellyfin.Api/Controllers/VideoAttachmentsController.cs",
+    "Jellyfin.Api/Controllers/VideosController.cs",
+    "Jellyfin.Api/Helpers/MediaInfoHelper.cs",
 ]
+# Watched on top of the series: files behind a tracked issue we have NOT (yet)
+# patched at this base, so an upstream fix there is news even though it cannot
+# conflict. UserDataManager is the favourites-revert question, still open at 12.0.
+EXTRA_PATHS = [
+    "Emby.Server.Implementations/Library/UserDataManager.cs",
+]
+
+
+def _series_paths(findings):
+    """Files the series changes that also exist in the base tag."""
+    r = _run(["git", "diff", "--name-only", "v" + PINNED + ".." + SERIES], cwd=SRC_DIR)
+    if r.returncode != 0:
+        findings.append(f"could not derive watched paths from `{SERIES}` "
+                        f"({r.stderr.strip()[:200]}); using the built-in list")
+        return list(FALLBACK_PATHS)
+    paths = []
+    for path in r.stdout.split():
+        if path.startswith("tests/"):
+            continue
+        if _run(["git", "cat-file", "-e", f"v{PINNED}:{path}"], cwd=SRC_DIR).returncode != 0:
+            continue  # added by us; upstream has nothing to touch
+        paths.append(path)
+    if not paths:
+        findings.append(f"series `{SERIES}` touches no base-tag files?! using the built-in list")
+        return list(FALLBACK_PATHS)
+    return paths
+
+
+def watched_paths(findings):
+    paths = _series_paths(findings)
+    return paths + [p for p in EXTRA_PATHS if p not in paths]
+
 
 # Issues our patches correspond to. Closed upstream => our patch may be redundant.
 WATCHED_ISSUES = {
@@ -155,17 +194,32 @@ def check_release(state, findings):
         state["last_prerelease"] = tag
 
 
+# GitHub's `since` filters on COMMITTER date, not on when a commit joined the
+# branch. A PR's commits are typically days older than its merge, so a window that
+# starts at the last scan misses every PR merged since whose commits predate it --
+# permanently, because the next window starts later still. That is how #18025
+# (EncodingHelper.cs, committed Sep 13, merged Sep 14) went unreported. Look back
+# well past the last scan and let `seen_commits` absorb the overlap; the request
+# count is unchanged, only the results per request grow.
+LOOKBACK = timedelta(days=14)
+
+
 def check_paths(state, findings):
-    since = state.get("last_commit_scan") or (
-        datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+    last = state.get("last_commit_scan")
+    if last:
+        since = datetime.fromisoformat(last.replace("Z", "+00:00")) - LOOKBACK
+    else:
+        since = datetime.now(timezone.utc)  # fresh state: do not replay history
+    since = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     seen = state.setdefault("seen_commits", [])
+    paths = watched_paths(findings)
     for branch in WATCHED_BRANCHES:
-        for path in WATCHED_PATHS:
+        for path in paths:
             try:
                 commits = get(
                     "https://api.github.com/repos/jellyfin/jellyfin/commits"
                     f"?path={urllib.parse.quote(path)}&sha={urllib.parse.quote(branch)}"
-                    f"&since={since}&per_page=10")
+                    f"&since={since}&per_page=50")
             except urllib.error.HTTPError as e:
                 findings.append(f"could not scan `{path}` on `{branch}` ({e.code})")
                 continue
@@ -178,7 +232,7 @@ def check_paths(state, findings):
                     f"**{path.split('/')[-1]}** changed on `{branch}`\n"
                     f"`{c['sha'][:9]}` {subject}")
             time.sleep(1)  # stay well inside the anonymous rate limit
-    state["seen_commits"] = seen[-200:]
+    state["seen_commits"] = seen[-2000:]  # must outlast LOOKBACK on every watched path
     state["last_commit_scan"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
