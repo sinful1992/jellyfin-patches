@@ -53,6 +53,11 @@ boundaries.
 
 ## Where it stands
 
+**Prevalence on this server (2026-09-15): zero.** All retained transcode logs are
+`h264_vaapi` (Fire TV); no copy-codec remux has run in the retained history, so this defect
+has had no daily impact here. Seek time on the path that does run is measured in
+`seek-accuracy.md`.
+
 Removing the offset entirely eliminates the gap failure mode (0/15 late) at the cost of
 up to 0.8s of overlap per seek. That looks right on the numbers, but how players handle
 the overlap is untested, and the `// This will help subtitle syncing` comment suggests
