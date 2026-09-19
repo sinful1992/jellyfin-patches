@@ -5,7 +5,7 @@ A release here is not "upstream shipped something". It is: this exact patch seri
 built onto this exact base image digest, proven by the gates, and recorded so the
 same image can be rebuilt later or rolled back to.
 
-  tools/release.py                 # prepare 10.11.11-p<next>: build, manifest, changelog, tag
+  tools/release.py                 # prepare <base>-p<next>: build, manifest, changelog, tag
   tools/release.py --version 10.11.12-p1
   tools/release.py --publish       # ...and push the tag + create the GitHub release
 
@@ -137,7 +137,7 @@ def main():
 
     base_tag = "v" + Path(REPO / "VERSION").read_text().strip().split("-p")[0]
     base_image = (REPO / "BASE_IMAGE").read_text().strip()
-    series = "patched/10.11.11"
+    series = "patched/" + base_tag[1:]   # follows the base, like the hook
     version = a.version or next_version((REPO / "VERSION").read_text().strip())
 
     # The series must already be what patches/ says, or the release records a lie.

@@ -84,8 +84,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("targets", nargs="+", help="upstream tags to test, e.g. v12.0-rc7")
     ap.add_argument("--src-dir", default=str(Path.home() / "src/jellyfin"))
-    ap.add_argument("--base-tag", default="v10.11.11")
-    ap.add_argument("--series", default="patched/10.11.11")
+    _base = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip().rsplit("-p", 1)[0]
+    ap.add_argument("--base-tag", default="v" + _base)
+    ap.add_argument("--series", default="patched/" + _base)
     ap.add_argument("--quiet-if-clean", action="store_true",
                     help="print nothing for a target that needs no hand work")
     a = ap.parse_args()

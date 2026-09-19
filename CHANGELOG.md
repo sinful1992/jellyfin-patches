@@ -3,6 +3,43 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p1 — 2026-09-19
+
+Base `v12.1` · image `jellyfin-patched:12.1-p1`
+Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
+
+**Base bump: 12.0 → 12.1.** Upstream tagged `v12.1` on 2026-09-15 (47 PRs / 148 files)
+and LinuxServer published `12.1ubu2604-ls50` the same day. The 12.0→12.1 diff touches
+**none** of the 12 files the series changes; `patched/12.1` is `patched/12.0` rebased onto
+`v12.1` with no conflicts and byte-identical series content. `patched/12.0` is archived
+(tag `v12.0-p1` still rebuilds it).
+
+The series is unchanged: 4 commits (stream-ticket auth). Still needed — at `v12.1`
+`GetAudioStream`/`GetVideoStream` carry no `[Authorize]`. `UserDataManager.cs` is
+untouched upstream, so the unported userdata fix stays unported.
+
+**12.1 is another one-way DB upgrade**: 4 migration routines
+(`ConsolidateLocalizedUserViews`, `RepairAlternateVersionLinks`, `MigrateRatingLevels`,
+`StripEmbeddedLinkedChildren`) + 3 EF schema migrations. The pre-12.0 config backup does
+not cover a 12.1 rollback; take a fresh stopped-container copy before deploying.
+
+Intro Skipper: `targetAbi` is a minimum, not a pin. The 12.0→12.1 public API only gained
+members (`ILibraryManager.GetTagNames`, `ILiveTvManager.IsEnabledForUser`) and no type
+the plugin implements changed, so the `12.0/` line (12.0.4.0 installed) is expected to
+load unchanged. Verified at deploy, not assumed — the smoke test does not check plugin load.
+
+### Tooling
+- Base tag and series are now DERIVED from `VERSION` in `build.sh`, `regen-patches.sh`,
+  `release.py`, `port-check.py` and the watcher (the hook already did this). The 12.0
+  bump left `release.py` and `port-check.py` on `patched/10.11.11`, and `12.0-p1` was cut
+  by hand as a result — no manifest, no GitHub release.
+- Watcher: new `check_base_image` watches LinuxServer's release-tag images — the thing
+  that actually gates a bump. Both 12.0 and 12.1 images had to be found by hand; 12.1
+  sat unbumped 2026-09-15..19 with every gate clear because nothing said so.
+- Watcher: the Intro Skipper line is picked at run time (newest line ≤ our base that
+  exists), so a base bump to 12.1 keeps watching `12.0/` instead of reporting an empty
+  `12.1/` line every day.
+
 ## 12.0-p1 — 2026-09-09
 
 Base `v12.0` · image `jellyfin-patched:12.0-p1`

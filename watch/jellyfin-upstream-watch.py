@@ -8,6 +8,7 @@ and needs no token to leak into a public repo.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,10 +20,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BOT = "Bloodhound"
-PINNED = "12.0"                           # the server release we build from
-# The plugin names its release lines after the server major ("12.0/v12.0.3.0"), so
-# this follows PINNED and rebaselines itself at a base bump.
-INTRO_SKIPPER_LINE = os.environ.get("JF_INTRO_SKIPPER_LINE", PINNED)
+REPO_ROOT = Path(os.environ.get("JF_REPO_DIR", Path.home() / "jellyfin-patches"))
+# The server release we build from: the base half of VERSION (<base>-p<N>). Derived,
+# not hardcoded, so a base bump edits one file -- the 12.0 bump left this at "12.0"
+# in one place and "10.11.11" in three others.
+PINNED = (REPO_ROOT / "VERSION").read_text().strip().rsplit("-p", 1)[0]
+# The plugin's release line ("12.0/v12.0.4.0") is chosen at run time by
+# _intro_skipper_line(): the newest line <= PINNED that exists. JF_INTRO_SKIPPER_LINE overrides.
 STATE = Path(os.environ.get("JF_WATCH_STATE", Path.home() / ".local/state/jellyfin-watch/state.json"))
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
@@ -37,7 +41,6 @@ SRC_DIR = Path(os.environ.get("JF_SRC_DIR", Path.home() / "src/jellyfin"))
 # Read from the repo's VERSION file, never hardcoded: image tags are immutable per
 # release (jellyfin-patched:10.11.11-p1), so a hardcoded tag would either false-alarm
 # after every release or, if set to something moving, stop detecting a stock revert.
-REPO_ROOT = Path(os.environ.get("JF_REPO_DIR", Path.home() / "jellyfin-patches"))
 
 
 def _fork_version():
@@ -65,7 +68,7 @@ def _expected_images():
 
 
 OUT_IMAGE = os.environ.get("JF_OUT_IMAGE") or _expected_images()[0]
-SERIES = os.environ.get("JF_SERIES", "patched/12.0")
+SERIES = os.environ.get("JF_SERIES", "patched/" + PINNED)
 PORT_CHECK = Path(os.environ.get("JF_PORT_CHECK", Path.home() / "jellyfin-patches/tools/port-check.py"))
 
 # Files our patches touch. An upstream commit here means a rebase may conflict,
@@ -291,6 +294,91 @@ def _installed_intro_skipper():
     return best
 
 
+def _intro_skipper_line(rels):
+    """Which plugin release line serves our server.
+
+    The plugin's `targetAbi` is a MINIMUM, not a pin: the `12.0/` builds target
+    12.0.0.0 and load on 12.1 (verified 2026-09-19 -- the 12.0->12.1 public API only
+    gained members). So after a base bump to 12.1 the right line is still `12.0/`
+    unless the plugin opens a `12.1/` one. Pick the newest line that is <= PINNED,
+    from the lines that actually exist; JF_INTRO_SKIPPER_LINE still overrides.
+    """
+    forced = os.environ.get("JF_INTRO_SKIPPER_LINE")
+    if forced:
+        return forced
+    lines = {r["tag_name"].split("/", 1)[0] for r in rels if "/" in r["tag_name"]}
+    ok = [l for l in lines if re.fullmatch(r"\d+(\.\d+)*", l) and _ver(l) <= _ver(PINNED)]
+    return max(ok, key=_ver) if ok else PINNED
+
+
+def _base_image_tag():
+    """The lsio tag BASE_IMAGE pins, e.g. '12.1ubu2604-ls50' (digest stripped)."""
+    try:
+        ref = (REPO_ROOT / "BASE_IMAGE").read_text().strip()
+    except OSError:
+        return None
+    return ref.split("@", 1)[0].rsplit(":", 1)[-1]
+
+
+def _lsio_tags():
+    """Release-tag images LinuxServer has published: {'12.1': ['12.1ubu2604-ls50', ...]}."""
+    rels = get("https://api.github.com/repos/linuxserver/docker-jellyfin/releases?per_page=30")
+    out = {}
+    for r in rels:
+        m = re.fullmatch(r"(\d+(?:\.\d+)+)ubu\d+-ls(\d+)", r["tag_name"])
+        if m and not r["draft"]:
+            out.setdefault(m.group(1), []).append(r["tag_name"])
+    return out
+
+
+def check_base_image(state, findings):
+    """Watch the thing that actually gates a base bump: the LinuxServer image.
+
+    The upstream tag is necessary but not sufficient -- build.sh overlays our
+    assemblies onto lsio's image, so no lsio release-tag image means no bump. This
+    watcher saw v12.0 and v12.1 on the day each was tagged and said nothing about
+    the images; both had to be found by hand, and 12.1 sat unbumped for four days
+    (2026-09-15..19) with every gate clear because nothing ever said so.
+
+    Two findings, each keyed on the pair so it posts once per real change:
+      - a newer upstream release than PINNED HAS an lsio image -> "gate is clear"
+      - a newer -lsN rebuild of OUR base tag exists -> base moved under us
+    """
+    tags = _lsio_tags()
+    pinned_tag = _base_image_tag()
+
+    newest_up = state.get("last_release")   # set by check_release, runs first
+    if newest_up and _ver(newest_up) > _ver(PINNED):
+        have = sorted(tags.get(newest_up, []), key=lambda t: int(t.rsplit("-ls", 1)[1]))
+        key = f"{newest_up}:{have[-1] if have else '-'}"
+        if have and state.get("last_base_gate") != key:
+            findings.append(
+                f"**The {newest_up} bump is UNBLOCKED** -- upstream tag `v{newest_up}` AND "
+                f"`lscr.io/linuxserver/jellyfin:{have[-1]}` both exist (we build from {PINNED} on "
+                f"`{pinned_tag}`). The port-check below says what the series costs to move.\n"
+                f"https://github.com/linuxserver/docker-jellyfin/releases/tag/{have[-1]}")
+        state["last_base_gate"] = key
+
+    if pinned_tag:
+        mine = sorted(tags.get(PINNED, []), key=lambda t: int(t.rsplit("-ls", 1)[1]))
+        if mine and mine[-1] != pinned_tag and _ls_num(mine[-1]) > _ls_num(pinned_tag):
+            key = f"{pinned_tag}->{mine[-1]}"
+            if state.get("last_base_rebuild") != key:
+                findings.append(
+                    f"**LinuxServer rebuilt our base**: `{mine[-1]}` is out, BASE_IMAGE pins "
+                    f"`{pinned_tag}`. Usually a base-OS/ffmpeg refresh -- a `-p<N+1>` rebuild "
+                    f"picks it up (the ABI gate checks it is still the same dependency graph).\n"
+                    f"https://github.com/linuxserver/docker-jellyfin/releases/tag/{mine[-1]}")
+            state["last_base_rebuild"] = key
+
+
+def _ls_num(tag):
+    try:
+        return int(tag.rsplit("-ls", 1)[1])
+    except (IndexError, ValueError):
+        return -1
+
+
 def check_intro_skipper(state, findings):
     """Track the release line for OUR server major, not whatever published last.
 
@@ -306,7 +394,8 @@ def check_intro_skipper(state, findings):
     # used to return quietly, so the check could be dead for months and look calm.
     # main() turns the exception into a loud ":warning: check failed" instead.
     rels = get("https://api.github.com/repos/intro-skipper/intro-skipper/releases?per_page=100")
-    prefix = INTRO_SKIPPER_LINE + "/"
+    line = _intro_skipper_line(rels)
+    prefix = line + "/"
     ours = [r for r in rels
             if r["tag_name"].startswith(prefix) and not r["prerelease"] and not r["draft"]]
 
@@ -314,10 +403,10 @@ def check_intro_skipper(state, findings):
         # Say it out loud rather than going quiet. Right after a base bump the plugin
         # may have no build for our line yet, and silence there is indistinguishable
         # from "up to date" -- which is the failure this whole watcher exists to avoid.
-        none_yet = f"(no {INTRO_SKIPPER_LINE} release)"
+        none_yet = f"(no {line} release)"
         if state.get("last_intro_skipper") != none_yet:
             findings.append(
-                f"**No Intro Skipper release for the `{INTRO_SKIPPER_LINE}` line** yet\n"
+                f"**No Intro Skipper release for the `{line}` line** yet\n"
                 f"FYI only -- it gates nothing. Reported because this check would "
                 f"otherwise be silent, which reads exactly like up to date.")
             state["last_intro_skipper"] = none_yet
@@ -339,7 +428,7 @@ def check_intro_skipper(state, findings):
             findings.append(
                 f"**Cannot read the installed Intro Skipper version** -- no readable "
                 f"`/config` mount or plugin directory for container `jellyfin`, so the "
-                f"newest build on the `{INTRO_SKIPPER_LINE}` line ({newest}) cannot be "
+                f"newest build on the `{line}` line ({newest}) cannot be "
                 f"compared against what is running. FYI only; it gates nothing.")
         state["last_intro_skipper_gap"] = "unknown"
         return
@@ -351,13 +440,13 @@ def check_intro_skipper(state, findings):
         if gap:
             findings.append(
                 f"**Intro Skipper {newest} is out -- `jellyfin` has {installed}** "
-                f"(the `{INTRO_SKIPPER_LINE}` line, ours)\n"
+                f"(the `{line}` line, ours)\n"
                 f"FYI only -- it is a nice-to-have, not a gate on anything. Reported so a "
                 f"base bump can pick up a matching build if one exists.\n{rel['html_url']}")
         elif state.get("last_intro_skipper_gap") not in (None, "", "unknown"):
             findings.append(
                 f"**Intro Skipper is current again** -- nothing newer than {installed} "
-                f"on the `{INTRO_SKIPPER_LINE}` line")
+                f"on the `{line}` line")
     state["last_intro_skipper_gap"] = gap
 
 
@@ -464,7 +553,8 @@ def main():
     state = load_state()
     findings = []
     errors = []
-    for name, fn in (("release", check_release), ("paths", check_paths),
+    for name, fn in (("release", check_release), ("base-image", check_base_image),
+                     ("paths", check_paths),
                      ("issues", check_issues), ("intro-skipper", check_intro_skipper),
                      ("port-check", check_port), ("deployment", check_deployment)):
         try:

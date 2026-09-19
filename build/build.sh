@@ -8,7 +8,8 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$HOME/jellyfin-patches}"
 STAGE=""
 SRC_DIR="${SRC_DIR:-$HOME/src/jellyfin}"
-BASE_TAG="${BASE_TAG:-v12.0}"
+# Derived from VERSION (<upstream base>-p<N>), like the hook: a base bump edits one file.
+BASE_TAG="${BASE_TAG:-v$(sed 's/-p[0-9]*$//' "$REPO_DIR/VERSION" | tr -d '[:space:]')}"
 
 # One source of truth for both, read by build.sh, tools/release.sh and the watcher.
 #

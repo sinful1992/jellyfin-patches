@@ -8,8 +8,9 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$HOME/jellyfin-patches}"
 SRC_DIR="${SRC_DIR:-$HOME/src/jellyfin}"
-BASE_TAG="${BASE_TAG:-v12.0}"
-SERIES="${SERIES:-patched/12.0}"
+_base="$(sed 's/-p[0-9]*$//' "$REPO_DIR/VERSION" | tr -d '[:space:]')"   # derived from VERSION
+BASE_TAG="${BASE_TAG:-v${_base}}"
+SERIES="${SERIES:-patched/${_base}}"
 
 cd "$SRC_DIR"
 git rev-parse --verify --quiet "$SERIES" >/dev/null || { echo "no such branch: $SERIES"; exit 1; }
