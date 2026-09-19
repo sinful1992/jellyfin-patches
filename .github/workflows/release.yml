@@ -28,7 +28,12 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          # 12.x pins SDK 10 in global.json; 10.11.x pinned 9. Install both so a build of
+          # either base is real, not a runner-image coincidence (the 12.0-p1 and 12.1-p1
+          # runs passed on a '9.0.x' pin only because the runner happened to ship 10).
+          dotnet-version: |
+            9.0.x
+            10.0.x
 
       - name: Resolve version and base tag
         id: v
