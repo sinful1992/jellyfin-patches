@@ -1,0 +1,93 @@
+{
+    "Serilog": {
+        "MinimumLevel": {
+            "Default": "Information",
+            "Override": {
+                "Microsoft": "Warning",
+                "System": "Warning",
+                "Microsoft.AspNetCore.Hosting.Diagnostics": "Information"
+            }
+        },
+        "WriteTo": [
+            {
+                "Name": "Logger",
+                "Args": {
+                    "configureLogger": {
+                        "Filter": [
+                            { "Name": "ByExcluding", "Args": { "expression": "SourceContext = 'Microsoft.AspNetCore.Hosting.Diagnostics'" } }
+                        ],
+                        "WriteTo": [
+                            {
+                                "Name": "Console",
+                                "Args": {
+                                    "outputTemplate": "[{Timestamp:HH:mm:ss}] [{Level:u3}] [{ThreadId}] {SourceContext}: {Message:lj}{NewLine}{Exception}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "Name": "Logger",
+                "Args": {
+                    "configureLogger": {
+                        "Filter": [
+                            { "Name": "ByExcluding", "Args": { "expression": "SourceContext = 'Microsoft.AspNetCore.Hosting.Diagnostics'" } }
+                        ],
+                        "WriteTo": [
+                            {
+                                "Name": "Async",
+                                "Args": {
+                                    "configure": [
+                                        {
+                                            "Name": "File",
+                                            "Args": {
+                                                "path": "%JELLYFIN_LOG_DIR%//log_.log",
+                                                "rollingInterval": "Day",
+                                                "retainedFileCountLimit": 3,
+                                                "rollOnFileSizeLimit": true,
+                                                "fileSizeLimitBytes": 100000000,
+                                                "outputTemplate": "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] [{ThreadId}] {SourceContext}: {Message}{NewLine}{Exception}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                "Name": "Logger",
+                "Args": {
+                    "configureLogger": {
+                        "Filter": [
+                            { "Name": "ByIncludingOnly", "Args": { "expression": "SourceContext = 'Microsoft.AspNetCore.Hosting.Diagnostics' and StartsWith(@m, 'Request finished') and not (Contains(@m, '/Images/') or Contains(@m, '/hls') or Contains(@m, '/web/') or Contains(@m, '/Sessions') or Contains(@m, '/System/Ping') or Contains(@m, '/health') or Contains(@m, '/socket'))" } }
+                        ],
+                        "WriteTo": [
+                            {
+                                "Name": "Async",
+                                "Args": {
+                                    "configure": [
+                                        {
+                                            "Name": "File",
+                                            "Args": {
+                                                "path": "%JELLYFIN_LOG_DIR%//access_.log",
+                                                "rollingInterval": "Day",
+                                                "retainedFileCountLimit": 7,
+                                                "rollOnFileSizeLimit": true,
+                                                "fileSizeLimitBytes": 50000000,
+                                                "outputTemplate": "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} {Message:lj}{NewLine}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        ],
+        "Enrich": [ "FromLogContext", "WithThreadId" ]
+    }
+}

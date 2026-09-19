@@ -332,3 +332,14 @@ it breaks is worse than no monitor.
     tools/     regen-patches.sh, port-check.py, smoke-test.sh, release.py, push-image.sh
     watch/     upstream watcher
     notes/     investigation write-ups, including things that turned out to be wrong
+
+## Access log (server-side request timing)
+
+Jellyfin ships no request log. `config/logging.json` (installed at
+`/mnt/data/docker-data/jellyfin/logging.json`, restart to apply) routes ASP.NET's
+"Request finished" lines -- method, full URL incl. query string, status, duration --
+into `log/access_.log`, filtered of images / HLS / web assets / polling noise, and
+keeps them out of the console and main log. `tools/access-report.py` summarises it:
+p50/p95 per templated route, `--fields` for what each client really asks for,
+`--slow N` for individual outliers. This is how a backend change gets measured
+against real traffic instead of a hand-written benchmark.
