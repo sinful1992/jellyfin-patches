@@ -13,6 +13,8 @@ Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cd
 intact, Intro Skipper 12.0.4.0 loaded unchanged, auth patch 401 ×3 live, PlaybackInfo → 206.
 Pre-migration backup: `/mnt/data/docker-data/_jellyfin-pre-12.1-backup-20260919-232810`
 (full config minus `cache/` + `transcodes/`; 4.5G). `jellyfin-patched:12.0-p1` kept on disk.
+That snapshot predates `logging.json` (2026-09-20) — a rollback drops the access log; re-copy
+`config/logging.json` in after restoring.
 
 **Base bump: 12.0 → 12.1.** Upstream tagged `v12.1` on 2026-09-15 (47 PRs / 148 files)
 and LinuxServer published `12.1ubu2604-ls50` the same day. The 12.0→12.1 diff touches
