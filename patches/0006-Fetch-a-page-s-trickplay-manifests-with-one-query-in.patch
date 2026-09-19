@@ -22,18 +22,18 @@ ITrickplayManager, which lives in MediaBrowser.Controller.
  2 files changed, 102 insertions(+), 5 deletions(-)
 
 diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
-index 673b6882de..915f8d887f 100644
+index d8844b01ba..afd6795ff3 100644
 --- a/Emby.Server.Implementations/Dto/DtoService.cs
 +++ b/Emby.Server.Implementations/Dto/DtoService.cs
-@@ -11,6 +11,7 @@ using Emby.Server.Implementations.Library;
- using Jellyfin.Data.Enums;
- using Jellyfin.Database.Implementations.Entities;
+@@ -13,6 +13,7 @@ using Jellyfin.Database.Implementations.Entities;
  using Jellyfin.Extensions;
+ using Jellyfin.Server.Implementations.Item;
+ using Jellyfin.Server.Implementations.MediaSegments;
 +using Jellyfin.Server.Implementations.Trickplay;
  using MediaBrowser.Common;
  using MediaBrowser.Controller.Channels;
  using MediaBrowser.Controller.Chapters;
-@@ -262,6 +263,18 @@ namespace Emby.Server.Implementations.Dto
+@@ -264,6 +265,18 @@ namespace Emby.Server.Implementations.Dto
                  }
              }
  
@@ -52,7 +52,7 @@ index 673b6882de..915f8d887f 100644
              // Batch-detect which videos own alternate versions to avoid the per-item alternate-version
              // queries in MediaSourceCount. Videos absent from this set have a single media source.
              IReadOnlySet<Guid>? alternateVersionItemIds = null;
-@@ -289,7 +302,8 @@ namespace Emby.Server.Implementations.Dto
+@@ -291,7 +304,8 @@ namespace Emby.Server.Implementations.Dto
                      artistsBatch,
                      resumeDataBatch?.GetValueOrDefault(item.Id),
                      peopleBatch,
@@ -62,7 +62,7 @@ index 673b6882de..915f8d887f 100644
  
                  if (item is LiveTvChannel tvChannel)
                  {
-@@ -383,7 +397,8 @@ namespace Emby.Server.Implementations.Dto
+@@ -407,7 +421,8 @@ namespace Emby.Server.Implementations.Dto
              IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null,
              VersionResumeData? resumeData = null,
              IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
@@ -72,7 +72,7 @@ index 673b6882de..915f8d887f 100644
          {
              var dto = new BaseItemDto
              {
-@@ -452,7 +467,7 @@ namespace Emby.Server.Implementations.Dto
+@@ -476,7 +491,7 @@ namespace Emby.Server.Implementations.Dto
                  AttachStudios(dto, item);
              }
  
@@ -81,7 +81,7 @@ index 673b6882de..915f8d887f 100644
  
              if (options.ContainsField(ItemFields.CanDelete))
              {
-@@ -1143,7 +1158,8 @@ namespace Emby.Server.Implementations.Dto
+@@ -1167,7 +1182,8 @@ namespace Emby.Server.Implementations.Dto
          /// <param name="artistsBatch">Optional pre-fetched artist lookup shared across a batch of items.</param>
          /// <param name="user">The user, for per-user values such as the accessible media source count.</param>
          /// <param name="alternateVersionItemIds">Optional pre-fetched set of item IDs that own alternate versions, shared across a batch of items.</param>
@@ -91,7 +91,7 @@ index 673b6882de..915f8d887f 100644
          {
              if (options.ContainsField(ItemFields.DateCreated))
              {
-@@ -1483,7 +1499,11 @@ namespace Emby.Server.Implementations.Dto
+@@ -1507,7 +1523,11 @@ namespace Emby.Server.Implementations.Dto
  
                  if (options.ContainsField(ItemFields.Trickplay))
                  {

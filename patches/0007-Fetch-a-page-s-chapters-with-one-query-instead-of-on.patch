@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 20 Sep 2026 00:58:48 +0100
+Subject: [PATCH] Fetch a page's chapters with one query instead of one per
+ item
+
+The Chapters field cost one Chapters query per item -- 134 round-trips
+on a full-series episode list, and the Android TV app asks for the field
+on every list it renders. ChapterRepository gains GetChaptersByItems,
+ChapterManager exposes it, and DtoService fetches the page's chapters
+once and hands them down. Same rows, same order (start position), and
+an item the batch did not return has no chapters, as before. The
+single-item path is unchanged; IChapterManager and IChapterRepository
+(MediaBrowser.Controller) are not touched.
+---
+ .../Chapters/ChapterManager.cs                | 17 +++++++++
+ Emby.Server.Implementations/Dto/DtoService.cs | 24 ++++++++++---
+ .../Item/ChapterRepository.cs                 | 36 +++++++++++++++++++
+ 3 files changed, 72 insertions(+), 5 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Chapters/ChapterManager.cs b/Emby.Server.Implementations/Chapters/ChapterManager.cs
+index 69cbe533c6..6379724848 100644
+--- a/Emby.Server.Implementations/Chapters/ChapterManager.cs
++++ b/Emby.Server.Implementations/Chapters/ChapterManager.cs
+@@ -5,6 +5,7 @@ using System.Linq;
+ using System.Threading;
+ using System.Threading.Tasks;
+ using Jellyfin.Extensions;
++using Jellyfin.Server.Implementations.Item;
+ using MediaBrowser.Controller.Chapters;
+ using MediaBrowser.Controller.Entities;
+ using MediaBrowser.Controller.Entities.Audio;
+@@ -262,6 +263,22 @@ public class ChapterManager : IChapterManager
+         return _chapterRepository.GetChapters(baseItemId);
+     }
+ 
++    /// <summary>
++    /// Gets the chapters of many items in one query.
++    /// </summary>
++    /// <remarks>
++    /// Not on <see cref="IChapterManager"/> (MediaBrowser.Controller, untouched by this fork);
++    /// DtoService type-tests for this class.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>Chapters by item, or null when the repository cannot batch.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<ChapterInfo>>? GetChaptersByItems(IReadOnlyList<Guid> itemIds)
++    {
++        return _chapterRepository is ChapterRepository repository
++            ? repository.GetChaptersByItems(itemIds)
++            : null;
++    }
++
+     /// <inheritdoc />
+     public async Task DeleteChapterDataAsync(Guid itemId, CancellationToken cancellationToken)
+     {
+diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
+index afd6795ff3..65d1288f0c 100644
+--- a/Emby.Server.Implementations/Dto/DtoService.cs
++++ b/Emby.Server.Implementations/Dto/DtoService.cs
+@@ -7,6 +7,7 @@ using System.Globalization;
+ using System.IO;
+ using System.Linq;
+ using Jellyfin.Data;
++using Emby.Server.Implementations.Chapters;
+ using Emby.Server.Implementations.Library;
+ using Jellyfin.Data.Enums;
+ using Jellyfin.Database.Implementations.Entities;
+@@ -277,6 +278,13 @@ namespace Emby.Server.Implementations.Dto
+                 }
+             }
+ 
++            // Batch-fetch chapters: one query for the page instead of one per item.
++            IReadOnlyDictionary<Guid, IReadOnlyList<ChapterInfo>>? chaptersBatch = null;
++            if (options.ContainsField(ItemFields.Chapters) && accessibleItems.Count > 1 && _chapterManager is ChapterManager chapterManager)
++            {
++                chaptersBatch = chapterManager.GetChaptersByItems(accessibleItems.Select(i => i.Id).ToList());
++            }
++
+             // Batch-detect which videos own alternate versions to avoid the per-item alternate-version
+             // queries in MediaSourceCount. Videos absent from this set have a single media source.
+             IReadOnlySet<Guid>? alternateVersionItemIds = null;
+@@ -305,7 +313,8 @@ namespace Emby.Server.Implementations.Dto
+                     resumeDataBatch?.GetValueOrDefault(item.Id),
+                     peopleBatch,
+                     alternateVersionItemIds,
+-                    trickplayBatch);
++                    trickplayBatch,
++                    chaptersBatch);
+ 
+                 if (item is LiveTvChannel tvChannel)
+                 {
+@@ -422,7 +431,8 @@ namespace Emby.Server.Implementations.Dto
+             VersionResumeData? resumeData = null,
+             IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
+             IReadOnlySet<Guid>? alternateVersionItemIds = null,
+-            IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null)
++            IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null,
++            IReadOnlyDictionary<Guid, IReadOnlyList<ChapterInfo>>? chaptersBatch = null)
+         {
+             var dto = new BaseItemDto
+             {
+@@ -491,7 +501,7 @@ namespace Emby.Server.Implementations.Dto
+                 AttachStudios(dto, item);
+             }
+ 
+-            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds, trickplayBatch);
++            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds, trickplayBatch, chaptersBatch);
+ 
+             if (options.ContainsField(ItemFields.CanDelete))
+             {
+@@ -1183,7 +1193,8 @@ namespace Emby.Server.Implementations.Dto
+         /// <param name="user">The user, for per-user values such as the accessible media source count.</param>
+         /// <param name="alternateVersionItemIds">Optional pre-fetched set of item IDs that own alternate versions, shared across a batch of items.</param>
+         /// <param name="trickplayBatch">Trickplay manifests fetched for the whole page, or null on the single-item path.</param>
+-        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null, IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null)
++        /// <param name="chaptersBatch">Chapters fetched for the whole page, or null on the single-item path.</param>
++        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null, IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null, IReadOnlyDictionary<Guid, IReadOnlyList<ChapterInfo>>? chaptersBatch = null)
+         {
+             if (options.ContainsField(ItemFields.DateCreated))
+             {
+@@ -1540,7 +1551,10 @@ namespace Emby.Server.Implementations.Dto
+ 
+             if (options.ContainsField(ItemFields.Chapters))
+             {
+-                dto.Chapters = _chapterManager.GetChapters(item.Id).ToList();
++                // The page path fetched every item's chapters up front; a miss there means "none".
++                dto.Chapters = chaptersBatch is not null
++                    ? (chaptersBatch.GetValueOrDefault(item.Id) ?? []).ToList()
++                    : _chapterManager.GetChapters(item.Id).ToList();
+             }
+ 
+             if (options.ContainsField(ItemFields.MediaStreams))
+diff --git a/Jellyfin.Server.Implementations/Item/ChapterRepository.cs b/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
+index f7d76517e1..7447208982 100644
+--- a/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
++++ b/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
+@@ -66,6 +66,42 @@ public class ChapterRepository : IChapterRepository
+             .ToArray();
+     }
+ 
++    /// <summary>
++    /// Gets the chapters of many items in one query.
++    /// </summary>
++    /// <remarks>
++    /// Not on <see cref="IChapterRepository"/>, which lives in MediaBrowser.Controller -- the assembly
++    /// plugins bind against, shipped untouched by this fork. Callers type-test for this class.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>The chapters of each item that has any, in start-position order.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<ChapterInfo>> GetChaptersByItems(IReadOnlyList<Guid> itemIds)
++    {
++        if (itemIds.Count == 0)
++        {
++            return new Dictionary<Guid, IReadOnlyList<ChapterInfo>>();
++        }
++
++        using var context = _dbProvider.CreateDbContext();
++        var result = new Dictionary<Guid, IReadOnlyList<ChapterInfo>>();
++        foreach (var group in context.Chapters.AsNoTracking()
++                     .Where(e => itemIds.Contains(e.ItemId))
++                     .OrderBy(e => e.ItemId)
++                     .ThenBy(e => e.StartPositionTicks)
++                     .Select(e => new
++                     {
++                         chapter = e,
++                         baseItemPath = e.Item.Path
++                     })
++                     .AsEnumerable()
++                     .GroupBy(e => e.chapter.ItemId))
++        {
++            result[group.Key] = group.Select(e => Map(e.chapter, e.baseItemPath!)).ToArray();
++        }
++
++        return result;
++    }
++
+     /// <inheritdoc />
+     public void SaveChapters(Guid itemId, IReadOnlyList<ChapterInfo> chapters)
+     {

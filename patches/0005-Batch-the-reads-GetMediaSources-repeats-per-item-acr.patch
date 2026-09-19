@@ -1,0 +1,621 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 20 Sep 2026 00:57:28 +0100
+Subject: [PATCH] Batch the reads GetMediaSources repeats per item across a
+ page of DTOs
+
+Building a page of DTOs calls item.GetMediaSources() per item, and that
+reads media streams, attachments, alternate-version links (twice) and
+the media-segment flag from the database: five round-trips per item,
+buried in BaseItem.GetVersionInfo where a batch cannot be passed in. EF
+logging on a 134-episode series list with the Android TV app's field
+set: ~1,400 commands, ~1 s, of which the database itself was under
+100 ms. The cost is round-trips, not data.
+
+PagePrefetch (Jellyfin.Server.Implementations) is a request-scoped,
+AsyncLocal batch of those reads. DtoService opens it for a page, loading
+each batch through the concrete repositories in one query apiece, and
+the readers -- MediaSourceManager for streams and attachments,
+LibraryManager for alternate-version ids, MediaSegmentManager for the
+segment flag -- answer whole-item reads from it while it is open. It is
+gone when the method returns, so nothing is cached across requests and
+there is no staleness window. A covered item the batch did not return
+reads as empty; an item outside the scope falls through as before.
+
+MediaBrowser.Controller, the assembly plugins bind against, is not
+touched: the loaders sit on the concrete classes and are reached by type
+test, and the readers already live in assemblies this fork replaces.
+---
+ Emby.Server.Implementations/Dto/DtoService.cs |  59 +++++++
+ .../Library/LibraryManager.cs                 |  27 ++-
+ .../Library/MediaSourceManager.cs             |  54 ++++++
+ .../Item/LinkedChildrenService.cs             |  34 ++++
+ .../Item/MediaAttachmentRepository.cs         |  33 ++++
+ .../Item/MediaStreamRepository.cs             |  33 ++++
+ .../Item/PagePrefetch.cs                      | 162 ++++++++++++++++++
+ .../MediaSegments/MediaSegmentManager.cs      |  31 ++++
+ 8 files changed, 432 insertions(+), 1 deletion(-)
+ create mode 100644 Jellyfin.Server.Implementations/Item/PagePrefetch.cs
+
+diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
+index e539508644..d8844b01ba 100644
+--- a/Emby.Server.Implementations/Dto/DtoService.cs
++++ b/Emby.Server.Implementations/Dto/DtoService.cs
+@@ -7,9 +7,12 @@ using System.Globalization;
+ using System.IO;
+ using System.Linq;
+ using Jellyfin.Data;
++using Emby.Server.Implementations.Library;
+ using Jellyfin.Data.Enums;
+ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Extensions;
++using Jellyfin.Server.Implementations.Item;
++using Jellyfin.Server.Implementations.MediaSegments;
+ using MediaBrowser.Common;
+ using MediaBrowser.Controller.Channels;
+ using MediaBrowser.Controller.Chapters;
+@@ -164,6 +167,10 @@ namespace Emby.Server.Implementations.Dto
+             bool skipVisibilityCheck = false)
+         {
+             var accessibleItems = skipVisibilityCheck || user is null ? items : items.Where(x => x.IsVisible(user)).ToList();
++            // One query each for the reads item.GetMediaSources() repeats per item below
++            // (streams, attachments, alternate-version links, segment flag). Disposed with the
++            // method, i.e. with the request.
++            using var pagePrefetch = BeginPagePrefetch(accessibleItems, options);
+             var returnItems = new BaseItemDto[accessibleItems.Count];
+             List<(BaseItem, BaseItemDto)>? programTuples = null;
+             List<(BaseItemDto, LiveTvChannel)>? channelTuples = null;
+@@ -316,6 +323,58 @@ namespace Emby.Server.Implementations.Dto
+             return returnItems;
+         }
+ 
++        /// <summary>
++        /// Opens a <see cref="PagePrefetch"/> for the items whose DTOs will call GetMediaSources.
++        /// </summary>
++        /// <returns>The scope to dispose when the page is built, or null when nothing was prefetched.</returns>
++        private PagePrefetch? BeginPagePrefetch(IReadOnlyList<BaseItem> items, DtoOptions options)
++        {
++            var wantsSources = options.ContainsField(ItemFields.MediaSources)
++                || options.ContainsField(ItemFields.MediaStreams)
++                || options.ContainsField(ItemFields.Trickplay);
++
++            var itemIds = new List<Guid>(items.Count);
++            var videoIds = new List<Guid>(items.Count);
++            foreach (var item in items)
++            {
++                // Audio always reads its streams (HasLyrics); video only when a field asks for its
++                // sources. Channel-sourced items get their sources from the channel, not the database.
++                if (item is not IHasMediaSources || item.SourceType != SourceType.Library || !(wantsSources || item is Audio))
++                {
++                    continue;
++                }
++
++                itemIds.Add(item.Id);
++                if (item is Video)
++                {
++                    videoIds.Add(item.Id);
++                }
++            }
++
++            // A single item costs one query either way.
++            if (itemIds.Count < 2)
++            {
++                return null;
++            }
++
++            var mediaSourceManager = _mediaSourceManager as MediaSourceManager;
++            var streams = mediaSourceManager?.LoadMediaStreamsForPrefetch(itemIds);
++            var attachments = wantsSources ? mediaSourceManager?.LoadMediaAttachmentsForPrefetch(itemIds) : null;
++            var (local, linked) = wantsSources && videoIds.Count > 0 && _libraryManager is LibraryManager libraryManager
++                ? libraryManager.LoadAlternateVersionIdsForPrefetch(videoIds)
++                : (null, null);
++            var withSegments = wantsSources && BaseItem.MediaSegmentManager is MediaSegmentManager segmentManager
++                ? segmentManager.GetItemIdsWithSegments(itemIds)
++                : null;
++
++            if (streams is null && attachments is null && local is null && withSegments is null)
++            {
++                return null;
++            }
++
++            return PagePrefetch.Begin(itemIds.ToHashSet(), streams, attachments, local, linked, withSegments);
++        }
++
+         public BaseItemDto GetBaseItemDto(BaseItem item, DtoOptions options, User? user = null, BaseItem? owner = null)
+         {
+             var dto = GetBaseItemDtoInternal(item, options, user, owner, null);
+diff --git a/Emby.Server.Implementations/Library/LibraryManager.cs b/Emby.Server.Implementations/Library/LibraryManager.cs
+index caba304888..e9e3c20c73 100644
+--- a/Emby.Server.Implementations/Library/LibraryManager.cs
++++ b/Emby.Server.Implementations/Library/LibraryManager.cs
+@@ -24,6 +24,7 @@ using Jellyfin.Data.Enums;
+ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Database.Implementations.Enums;
+ using Jellyfin.Extensions;
++using Jellyfin.Server.Implementations.Item;
+ using MediaBrowser.Common.Extensions;
+ using MediaBrowser.Controller;
+ using MediaBrowser.Controller.Configuration;
+@@ -2299,6 +2300,11 @@ namespace Emby.Server.Implementations.Library
+         {
+             ArgumentNullException.ThrowIfNull(video);
+ 
++            if (PagePrefetch.Current is { } prefetch && prefetch.TryGetLocalAlternateVersionIds(video.Id, out var fromBatch))
++            {
++                return fromBatch;
++            }
++
+             var linkedIds = _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LocalAlternateVersion);
+             if (linkedIds.Count > 0)
+             {
+@@ -2313,7 +2319,9 @@ namespace Emby.Server.Implementations.Library
+         {
+             ArgumentNullException.ThrowIfNull(video);
+ 
+-            var linkedIds = _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
++            var linkedIds = PagePrefetch.Current is { } prefetch && prefetch.TryGetLinkedAlternateVersionIds(video.Id, out var fromBatch)
++                ? fromBatch
++                : _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion);
+             if (linkedIds.Count > 0)
+             {
+                 return linkedIds
+@@ -2326,6 +2334,23 @@ namespace Emby.Server.Implementations.Library
+             return [];
+         }
+ 
++        /// <summary>
++        /// Batch-reads the alternate version links of many videos for a <see cref="PagePrefetch"/>.
++        /// </summary>
++        /// <param name="videoIds">The video ids.</param>
++        /// <returns>Local and linked alternate version ids by video, or nulls when the service cannot batch.</returns>
++        public (IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? Local, IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? Linked) LoadAlternateVersionIdsForPrefetch(IReadOnlyList<Guid> videoIds)
++        {
++            if (_linkedChildrenService is not LinkedChildrenService service)
++            {
++                return (null, null);
++            }
++
++            return (
++                service.GetLinkedChildrenIdsByParents(videoIds, (int)MediaBrowser.Controller.Entities.LinkedChildType.LocalAlternateVersion),
++                service.GetLinkedChildrenIdsByParents(videoIds, (int)MediaBrowser.Controller.Entities.LinkedChildType.LinkedAlternateVersion));
++        }
++
+         /// <inheritdoc />
+         public IReadOnlySet<Guid> GetItemIdsWithAlternateVersions(IReadOnlyList<Guid> itemIds)
+         {
+diff --git a/Emby.Server.Implementations/Library/MediaSourceManager.cs b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+index e9bba05839..f411531e00 100644
+--- a/Emby.Server.Implementations/Library/MediaSourceManager.cs
++++ b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+@@ -19,6 +19,7 @@ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Database.Implementations.Enums;
+ using Jellyfin.Extensions;
+ using Jellyfin.Extensions.Json;
++using Jellyfin.Server.Implementations.Item;
+ using MediaBrowser.Common.Configuration;
+ using MediaBrowser.Common.Extensions;
+ using MediaBrowser.Controller;
+@@ -101,6 +102,15 @@ namespace Emby.Server.Implementations.Library
+ 
+         public IReadOnlyList<MediaStream> GetMediaStreams(MediaStreamQuery query)
+         {
++            // A whole-item read inside a page prefetch is answered from the batch.
++            if (query.Index is null
++                && query.Type is null
++                && PagePrefetch.Current is { } prefetch
++                && prefetch.TryGetMediaStreams(query.ItemId, out var fromBatch))
++            {
++                return fromBatch;
++            }
++
+             var list = _mediaStreamRepository.GetMediaStreams(query);
+ 
+             foreach (var stream in list)
+@@ -162,9 +172,53 @@ namespace Emby.Server.Implementations.Library
+         /// <inheritdoc />
+         public IReadOnlyList<MediaAttachment> GetMediaAttachments(MediaAttachmentQuery query)
+         {
++            if (query.Index is null
++                && PagePrefetch.Current is { } prefetch
++                && prefetch.TryGetMediaAttachments(query.ItemId, out var fromBatch))
++            {
++                return fromBatch;
++            }
++
+             return _mediaAttachmentRepository.GetMediaAttachments(query);
+         }
+ 
++        /// <summary>
++        /// Batch-reads the media streams of many items for a <see cref="PagePrefetch"/>, with the
++        /// same per-stream post-processing <see cref="GetMediaStreams(MediaStreamQuery)"/> applies.
++        /// </summary>
++        /// <param name="itemIds">The item ids.</param>
++        /// <returns>Streams by item, or null when the repository cannot batch.</returns>
++        public IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>> LoadMediaStreamsForPrefetch(IReadOnlyList<Guid> itemIds)
++        {
++            if (_mediaStreamRepository is not MediaStreamRepository repository)
++            {
++                return null;
++            }
++
++            var batch = repository.GetMediaStreamsByItems(itemIds);
++            foreach (var streams in batch.Values)
++            {
++                foreach (var stream in streams)
++                {
++                    stream.SupportsExternalStream = StreamSupportsExternalStream(stream);
++                }
++            }
++
++            return batch;
++        }
++
++        /// <summary>
++        /// Batch-reads the media attachments of many items for a <see cref="PagePrefetch"/>.
++        /// </summary>
++        /// <param name="itemIds">The item ids.</param>
++        /// <returns>Attachments by item, or null when the repository cannot batch.</returns>
++        public IReadOnlyDictionary<Guid, IReadOnlyList<MediaAttachment>> LoadMediaAttachmentsForPrefetch(IReadOnlyList<Guid> itemIds)
++        {
++            return _mediaAttachmentRepository is MediaAttachmentRepository repository
++                ? repository.GetMediaAttachmentsByItems(itemIds)
++                : null;
++        }
++
+         /// <inheritdoc />
+         public IReadOnlyList<MediaAttachment> GetMediaAttachments(Guid itemId)
+         {
+diff --git a/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs b/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
+index de112d7aa4..ea7371f17b 100644
+--- a/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
++++ b/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
+@@ -60,6 +60,40 @@ public class LinkedChildrenService : ILinkedChildrenService
+             .ToArray();
+     }
+ 
++    /// <summary>
++    /// Gets the linked children of one type for many parents in one query.
++    /// </summary>
++    /// <remarks>
++    /// A batch loader for <see cref="PagePrefetch"/>. Not on the repository interface, which lives in
++    /// MediaBrowser.Controller -- the assembly plugins bind against, shipped untouched by this fork.
++    /// Callers reach it by type-testing the instance they were given.
++    /// </remarks>
++    /// <param name="parentIds">The parent ids.</param>
++    /// <param name="childType">The child type, as <see cref="GetLinkedChildrenIds"/> takes it.</param>
++    /// <returns>The child ids of each parent that has any, in sort order.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<Guid>> GetLinkedChildrenIdsByParents(IReadOnlyList<Guid> parentIds, int childType)
++    {
++        if (parentIds.Count == 0)
++        {
++            return new Dictionary<Guid, IReadOnlyList<Guid>>();
++        }
++
++        using var dbContext = _dbProvider.CreateDbContext();
++        var result = new Dictionary<Guid, IReadOnlyList<Guid>>();
++        foreach (var group in dbContext.LinkedChildren
++                     .Where(lc => parentIds.Contains(lc.ParentId) && (int)lc.ChildType == childType)
++                     .OrderBy(lc => lc.ParentId)
++                     .ThenBy(lc => lc.SortOrder)
++                     .Select(lc => new { lc.ParentId, lc.ChildId })
++                     .AsEnumerable()
++                     .GroupBy(lc => lc.ParentId))
++        {
++            result[group.Key] = group.Select(lc => lc.ChildId).ToArray();
++        }
++
++        return result;
++    }
++
+     /// <inheritdoc/>
+     public IReadOnlySet<Guid> GetItemIdsWithAlternateVersions(IReadOnlyList<Guid> itemIds)
+     {
+diff --git a/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs b/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
+index e75dda4392..3a988c5ef8 100644
+--- a/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
++++ b/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
+@@ -52,6 +52,39 @@ public class MediaAttachmentRepository(IDbContextFactory<JellyfinDbContext> dbPr
+         return query.AsEnumerable().Select(Map).ToArray();
+     }
+ 
++    /// <summary>
++    /// Gets the media attachments of many items in one query.
++    /// </summary>
++    /// <remarks>
++    /// A batch loader for <see cref="PagePrefetch"/>. Not on the repository interface, which lives in
++    /// MediaBrowser.Controller -- the assembly plugins bind against, shipped untouched by this fork.
++    /// Callers reach it by type-testing the instance they were given.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>The attachments of each item that has any.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<MediaAttachment>> GetMediaAttachmentsByItems(IReadOnlyList<Guid> itemIds)
++    {
++        if (itemIds.Count == 0)
++        {
++            return new Dictionary<Guid, IReadOnlyList<MediaAttachment>>();
++        }
++
++        using var context = dbProvider.CreateDbContext();
++        var result = new Dictionary<Guid, IReadOnlyList<MediaAttachment>>();
++        foreach (var group in context.AttachmentStreamInfos
++                     .AsNoTracking()
++                     .Where(e => itemIds.Contains(e.ItemId))
++                     .OrderBy(e => e.ItemId)
++                     .ThenBy(e => e.Index)
++                     .AsEnumerable()
++                     .GroupBy(e => e.ItemId))
++        {
++            result[group.Key] = group.Select(Map).ToArray();
++        }
++
++        return result;
++    }
++
+     private MediaAttachment Map(AttachmentStreamInfo attachment)
+     {
+         return new MediaAttachment()
+diff --git a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
+index a25629132b..139d91d61e 100644
+--- a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
++++ b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
+@@ -55,6 +55,39 @@ public class MediaStreamRepository : IMediaStreamRepository
+         return TranslateQuery(context.MediaStreamInfos.AsNoTracking(), filter).AsEnumerable().Select(Map).ToArray();
+     }
+ 
++    /// <summary>
++    /// Gets the media streams of many items in one query.
++    /// </summary>
++    /// <remarks>
++    /// A batch loader for <see cref="PagePrefetch"/>. Not on the repository interface, which lives in
++    /// MediaBrowser.Controller -- the assembly plugins bind against, shipped untouched by this fork.
++    /// Callers reach it by type-testing the instance they were given.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>The streams of each item that has any, in stream-index order.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>> GetMediaStreamsByItems(IReadOnlyList<Guid> itemIds)
++    {
++        if (itemIds.Count == 0)
++        {
++            return ImmutableDictionary<Guid, IReadOnlyList<MediaStream>>.Empty;
++        }
++
++        using var context = _dbProvider.CreateDbContext();
++        var result = new Dictionary<Guid, IReadOnlyList<MediaStream>>(itemIds.Count);
++        foreach (var group in context.MediaStreamInfos
++                     .AsNoTracking()
++                     .Where(e => itemIds.Contains(e.ItemId))
++                     .OrderBy(e => e.ItemId)
++                     .ThenBy(e => e.StreamIndex)
++                     .AsEnumerable()
++                     .GroupBy(e => e.ItemId))
++        {
++            result[group.Key] = group.Select(Map).ToArray();
++        }
++
++        return result;
++    }
++
+     /// <inheritdoc />
+     public IReadOnlyList<string> GetMediaStreamLanguages(MediaStreamType mediaStreamType)
+     {
+diff --git a/Jellyfin.Server.Implementations/Item/PagePrefetch.cs b/Jellyfin.Server.Implementations/Item/PagePrefetch.cs
+new file mode 100644
+index 0000000000..986c2139f1
+--- /dev/null
++++ b/Jellyfin.Server.Implementations/Item/PagePrefetch.cs
+@@ -0,0 +1,162 @@
++using System;
++using System.Collections.Generic;
++using System.Threading;
++using MediaBrowser.Model.Entities;
++
++namespace Jellyfin.Server.Implementations.Item;
++
++/// <summary>
++/// The per-item reads a page of DTOs would otherwise repeat once per item, batch-read for the
++/// items of the current request.
++/// </summary>
++/// <remarks>
++/// <para>
++/// Building a page of DTOs calls <c>item.GetMediaSources()</c> per item, and that reads media
++/// streams, attachments, alternate-version links and the media-segment flag from the database --
++/// one round-trip each, per item, buried in <c>BaseItem.GetVersionInfo</c> where a batch cannot
++/// be threaded through as a parameter. Measured on a 15k-item library: ~1,400 commands and
++/// ~1 s for a 134-episode series list, of which the database itself accounted for under 100 ms.
++/// The cost is round-trips, not data.
++/// </para>
++/// <para>
++/// The scope is an <see cref="AsyncLocal{T}"/>: it belongs to the request that opened it, flows
++/// into anything that request awaits, and is gone when disposed. Nothing is cached across
++/// requests, so there is no staleness window. A miss for an item the scope covers means "none":
++/// the readers return empty instead of falling through to the per-item query for exactly the
++/// empty case. An item outside the scope falls through as before.
++/// </para>
++/// <para>
++/// This lives here, not in MediaBrowser.Controller, because that assembly is what plugins bind
++/// against and this fork ships it untouched. The readers that consult the scope are in
++/// Emby.Server.Implementations and this assembly, both of which the fork already replaces.
++/// </para>
++/// </remarks>
++public sealed class PagePrefetch : IDisposable
++{
++    private static readonly AsyncLocal<PagePrefetch?> _current = new();
++
++    private readonly PagePrefetch? _previous;
++    private readonly IReadOnlySet<Guid> _itemIds;
++    private readonly IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>>? _mediaStreams;
++    private readonly IReadOnlyDictionary<Guid, IReadOnlyList<MediaAttachment>>? _mediaAttachments;
++    private readonly IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? _localAlternateVersionIds;
++    private readonly IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? _linkedAlternateVersionIds;
++    private readonly IReadOnlySet<Guid>? _itemsWithSegments;
++
++    private PagePrefetch(
++        IReadOnlySet<Guid> itemIds,
++        IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>>? mediaStreams,
++        IReadOnlyDictionary<Guid, IReadOnlyList<MediaAttachment>>? mediaAttachments,
++        IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? localAlternateVersionIds,
++        IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? linkedAlternateVersionIds,
++        IReadOnlySet<Guid>? itemsWithSegments)
++    {
++        _itemIds = itemIds;
++        _mediaStreams = mediaStreams;
++        _mediaAttachments = mediaAttachments;
++        _localAlternateVersionIds = localAlternateVersionIds;
++        _linkedAlternateVersionIds = linkedAlternateVersionIds;
++        _itemsWithSegments = itemsWithSegments;
++        _previous = _current.Value;
++        _current.Value = this;
++    }
++
++    /// <summary>
++    /// Gets the scope of the current request, or null when none is open.
++    /// </summary>
++    public static PagePrefetch? Current => _current.Value;
++
++    /// <summary>
++    /// Opens a scope for <paramref name="itemIds"/>. Each batch is optional: a reader whose batch
++    /// is null falls through to its per-item query as if no scope were open.
++    /// </summary>
++    /// <param name="itemIds">The items the page is about to render.</param>
++    /// <param name="mediaStreams">Media streams by item, or null.</param>
++    /// <param name="mediaAttachments">Media attachments by item, or null.</param>
++    /// <param name="localAlternateVersionIds">Local alternate version ids by item, or null.</param>
++    /// <param name="linkedAlternateVersionIds">Linked alternate version ids by item, or null.</param>
++    /// <param name="itemsWithSegments">The items that have media segments, or null.</param>
++    /// <returns>The scope; dispose it when the page is built.</returns>
++    public static PagePrefetch Begin(
++        IReadOnlySet<Guid> itemIds,
++        IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>>? mediaStreams = null,
++        IReadOnlyDictionary<Guid, IReadOnlyList<MediaAttachment>>? mediaAttachments = null,
++        IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? localAlternateVersionIds = null,
++        IReadOnlyDictionary<Guid, IReadOnlyList<Guid>>? linkedAlternateVersionIds = null,
++        IReadOnlySet<Guid>? itemsWithSegments = null)
++    {
++        return new PagePrefetch(itemIds, mediaStreams, mediaAttachments, localAlternateVersionIds, linkedAlternateVersionIds, itemsWithSegments);
++    }
++
++    /// <summary>
++    /// Answers a whole-item media stream read from the batch.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <param name="streams">The item's streams, empty when the item has none.</param>
++    /// <returns>True when the scope covers the item and streams were batched.</returns>
++    public bool TryGetMediaStreams(Guid itemId, out IReadOnlyList<MediaStream> streams)
++        => TryGetList(_mediaStreams, itemId, out streams);
++
++    /// <summary>
++    /// Answers a whole-item media attachment read from the batch.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <param name="attachments">The item's attachments, empty when the item has none.</param>
++    /// <returns>True when the scope covers the item and attachments were batched.</returns>
++    public bool TryGetMediaAttachments(Guid itemId, out IReadOnlyList<MediaAttachment> attachments)
++        => TryGetList(_mediaAttachments, itemId, out attachments);
++
++    /// <summary>
++    /// Answers a local alternate version id read from the batch.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <param name="ids">The ids, empty when the item has none.</param>
++    /// <returns>True when the scope covers the item and links were batched.</returns>
++    public bool TryGetLocalAlternateVersionIds(Guid itemId, out IReadOnlyList<Guid> ids)
++        => TryGetList(_localAlternateVersionIds, itemId, out ids);
++
++    /// <summary>
++    /// Answers a linked alternate version id read from the batch.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <param name="ids">The ids, empty when the item has none.</param>
++    /// <returns>True when the scope covers the item and links were batched.</returns>
++    public bool TryGetLinkedAlternateVersionIds(Guid itemId, out IReadOnlyList<Guid> ids)
++        => TryGetList(_linkedAlternateVersionIds, itemId, out ids);
++
++    /// <summary>
++    /// Answers a media-segment existence check from the batch.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <param name="hasSegments">Whether the item has segments.</param>
++    /// <returns>True when the scope covers the item and segment flags were batched.</returns>
++    public bool TryGetHasSegments(Guid itemId, out bool hasSegments)
++    {
++        if (_itemsWithSegments is not null && _itemIds.Contains(itemId))
++        {
++            hasSegments = _itemsWithSegments.Contains(itemId);
++            return true;
++        }
++
++        hasSegments = false;
++        return false;
++    }
++
++    /// <inheritdoc />
++    public void Dispose()
++    {
++        _current.Value = _previous;
++    }
++
++    private bool TryGetList<T>(IReadOnlyDictionary<Guid, IReadOnlyList<T>>? batch, Guid itemId, out IReadOnlyList<T> list)
++    {
++        if (batch is not null && _itemIds.Contains(itemId))
++        {
++            list = batch.GetValueOrDefault(itemId) ?? Array.Empty<T>();
++            return true;
++        }
++
++        list = Array.Empty<T>();
++        return false;
++    }
++}
+diff --git a/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs b/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
+index be98f93dab..23091b8b33 100644
+--- a/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
++++ b/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
+@@ -9,6 +9,7 @@ using Jellyfin.Database.Implementations;
+ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Database.Implementations.Enums;
+ using Jellyfin.Extensions;
++using Jellyfin.Server.Implementations.Item;
+ using MediaBrowser.Common.Extensions;
+ using MediaBrowser.Controller.Entities;
+ using MediaBrowser.Controller.Entities.Audio;
+@@ -283,10 +284,40 @@ public class MediaSegmentManager : IMediaSegmentManager
+     /// <inheritdoc />
+     public bool HasSegments(Guid itemId)
+     {
++        if (PagePrefetch.Current is { } prefetch && prefetch.TryGetHasSegments(itemId, out var hasSegments))
++        {
++            return hasSegments;
++        }
++
+         using var db = _dbProvider.CreateDbContext();
+         return db.MediaSegments.Any(e => e.ItemId.Equals(itemId));
+     }
+ 
++    /// <summary>
++    /// Gets which of many items have media segments, in one query.
++    /// </summary>
++    /// <remarks>
++    /// A batch loader for <see cref="PagePrefetch"/>. Not on <see cref="IMediaSegmentManager"/>, which lives in
++    /// MediaBrowser.Controller -- the assembly plugins bind against, shipped untouched by this fork.
++    /// Callers reach it by type-testing the instance they were given.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>The ids that have at least one segment.</returns>
++    public IReadOnlySet<Guid> GetItemIdsWithSegments(IReadOnlyList<Guid> itemIds)
++    {
++        if (itemIds.Count == 0)
++        {
++            return new HashSet<Guid>();
++        }
++
++        using var db = _dbProvider.CreateDbContext();
++        return db.MediaSegments
++            .Where(e => itemIds.Contains(e.ItemId))
++            .Select(e => e.ItemId)
++            .Distinct()
++            .ToHashSet();
++    }
++
+     /// <inheritdoc/>
+     public bool IsTypeSupported(BaseItem baseItem)
+     {

@@ -8,22 +8,24 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p2`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
-**First performance commits in the series, and the first chosen from measurement of this
-server rather than from upstream's tracker.** With the app's real list field set, a
-134-episode series list took 590 ms; ~275 ms was one `TrickplayInfos` query per media
-source (trickplay is off here — the cost is round-trips) and ~276 ms was one
-`MediaStreamInfos` query per item under `MediaSources`. Two new commits:
+**First performance commits in the series, chosen from measuring this server rather than
+upstream's tracker.** EF command logging on a 134-episode series list with the Android TV
+app's field set: **~1,480 database commands for one request, ~1 s, of which the database itself
+took under 100 ms** — the cost is round-trips. Per item: media streams, attachments, two
+alternate-version link lookups, the media-segment flag (all inside `item.GetMediaSources()`),
+a trickplay query per media source, and a chapters query. Three new commits:
 
-- **Read a page's media streams in one query instead of one per item** — `MediaStreamRepository`
-  batch query + a request-scoped (`AsyncLocal`) prefetch in `MediaSourceManager` that every
-  whole-item stream read is answered from while the page is built. No cross-request cache.
-- **Fetch a page's trickplay manifests with one query instead of one per media source** —
-  `TrickplayManager.GetTrickplayManifests(items)`, same manifest shape as the per-item path.
+- **Batch the reads GetMediaSources repeats per item across a page of DTOs** — `PagePrefetch`, a
+  request-scoped (`AsyncLocal`) batch opened by `DtoService` for a page; `MediaSourceManager`,
+  `LibraryManager` and `MediaSegmentManager` answer whole-item reads from it while open. Nothing
+  cached across requests.
+- **Fetch a page's trickplay manifests with one query instead of one per media source.**
+- **Fetch a page's chapters with one query instead of one per item.**
 
 **Replaced assembly set grows 2 → 3:** `Jellyfin.Server.Implementations.dll` joins
 `Emby.Server.Implementations.dll` and `Jellyfin.Api.dll`. `MediaBrowser.Controller` — the
-assembly plugins bind against — is deliberately untouched: the new members sit on concrete
-classes and an internal contract, reached by type test.
+assembly plugins bind against — is deliberately untouched: batch loaders sit on the concrete
+classes, reached by type test.
 
 ## 12.1-p1 — 2026-09-19
 
