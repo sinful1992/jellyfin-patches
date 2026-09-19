@@ -1,0 +1,277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 20 Sep 2026 00:45:01 +0100
+Subject: [PATCH] Read a page's media streams in one query instead of one per
+ item
+
+MediaSources, MediaStreams, Trickplay and HasLyrics all end in
+item.GetMediaStreams(), one database round-trip per item, buried in
+Video.GetMediaSources where a batch cannot be threaded through. On this
+server that is ~2 ms per item: 276 ms of a 590 ms full-series episode
+list, and the same again on a 100-movie grid.
+
+MediaStreamRepository gains GetMediaStreamsByItems (one query, grouped).
+MediaSourceManager gains a request-scoped prefetch: an AsyncLocal batch
+that GetMediaStreams(query) answers whole-item reads from while the scope
+is open, so nothing is cached across requests and there is no staleness
+window. DtoService opens the scope for a page whenever a field will read
+streams, and only for two or more items.
+
+Neither addition touches MediaBrowser.Controller, the assembly plugins
+bind against: the new members sit on the concrete classes and an
+internal contract in this assembly, reached by type test.
+---
+ Emby.Server.Implementations/Dto/DtoService.cs | 35 +++++++++
+ .../Library/IMediaStreamPrefetch.cs           | 25 +++++++
+ .../Library/MediaSourceManager.cs             | 74 ++++++++++++++++++-
+ .../Item/MediaStreamRepository.cs             | 33 +++++++++
+ 4 files changed, 166 insertions(+), 1 deletion(-)
+ create mode 100644 Emby.Server.Implementations/Library/IMediaStreamPrefetch.cs
+
+diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
+index e539508644..673b6882de 100644
+--- a/Emby.Server.Implementations/Dto/DtoService.cs
++++ b/Emby.Server.Implementations/Dto/DtoService.cs
+@@ -7,6 +7,7 @@ using System.Globalization;
+ using System.IO;
+ using System.Linq;
+ using Jellyfin.Data;
++using Emby.Server.Implementations.Library;
+ using Jellyfin.Data.Enums;
+ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Extensions;
+@@ -164,6 +165,10 @@ namespace Emby.Server.Implementations.Dto
+             bool skipVisibilityCheck = false)
+         {
+             var accessibleItems = skipVisibilityCheck || user is null ? items : items.Where(x => x.IsVisible(user)).ToList();
++            // One media-stream query for the page instead of one per item, served to every
++            // whole-item stream read below (MediaSources, MediaStreams, Trickplay, HasLyrics all
++            // end in item.GetMediaStreams()). Disposed with the method, i.e. with the request.
++            using var mediaStreamPrefetch = PrefetchMediaStreams(accessibleItems, options);
+             var returnItems = new BaseItemDto[accessibleItems.Count];
+             List<(BaseItem, BaseItemDto)>? programTuples = null;
+             List<(BaseItemDto, LiveTvChannel)>? channelTuples = null;
+@@ -316,6 +321,36 @@ namespace Emby.Server.Implementations.Dto
+             return returnItems;
+         }
+ 
++        /// <summary>
++        /// Opens a request-scoped batch of media streams for the items whose DTOs will read them.
++        /// </summary>
++        /// <returns>The scope to dispose when the page is built, or null when nothing was prefetched.</returns>
++        private IDisposable? PrefetchMediaStreams(IReadOnlyList<BaseItem> items, DtoOptions options)
++        {
++            if (_mediaSourceManager is not IMediaStreamPrefetch prefetch)
++            {
++                return null;
++            }
++
++            var wantsStreams = options.ContainsField(ItemFields.MediaSources)
++                || options.ContainsField(ItemFields.MediaStreams)
++                || options.ContainsField(ItemFields.Trickplay);
++
++            var itemIds = new List<Guid>(items.Count);
++            foreach (var item in items)
++            {
++                // Audio always reads its streams (HasLyrics); video only when a field asks for them.
++                // Channel-sourced items get their sources from the channel, not from the database.
++                if (item is IHasMediaSources && item.SourceType == SourceType.Library && (wantsStreams || item is Audio))
++                {
++                    itemIds.Add(item.Id);
++                }
++            }
++
++            // A single item costs one query either way.
++            return itemIds.Count > 1 ? prefetch.PrefetchMediaStreams(itemIds) : null;
++        }
++
+         public BaseItemDto GetBaseItemDto(BaseItem item, DtoOptions options, User? user = null, BaseItem? owner = null)
+         {
+             var dto = GetBaseItemDtoInternal(item, options, user, owner, null);
+diff --git a/Emby.Server.Implementations/Library/IMediaStreamPrefetch.cs b/Emby.Server.Implementations/Library/IMediaStreamPrefetch.cs
+new file mode 100644
+index 0000000000..cbe7835e20
+--- /dev/null
++++ b/Emby.Server.Implementations/Library/IMediaStreamPrefetch.cs
+@@ -0,0 +1,25 @@
++using System;
++using System.Collections.Generic;
++
++namespace Emby.Server.Implementations.Library
++{
++    /// <summary>
++    /// Batch-reads the media streams of many items for the duration of one request.
++    /// </summary>
++    /// <remarks>
++    /// Internal to this assembly on purpose. The public <c>IMediaSourceManager</c> lives in
++    /// MediaBrowser.Controller, which plugins bind against; this fork leaves that assembly as
++    /// upstream ships it. <see cref="MediaSourceManager"/> implements this, and
++    /// <see cref="Emby.Server.Implementations.Dto.DtoService"/> type-tests for it.
++    /// </remarks>
++    public interface IMediaStreamPrefetch
++    {
++        /// <summary>
++        /// Reads the streams of <paramref name="itemIds"/> in one query and serves every
++        /// whole-item stream read for those items from that batch until the scope is disposed.
++        /// </summary>
++        /// <param name="itemIds">The items a page is about to render.</param>
++        /// <returns>A scope; dispose it when the page is built.</returns>
++        IDisposable PrefetchMediaStreams(IReadOnlyList<Guid> itemIds);
++    }
++}
+diff --git a/Emby.Server.Implementations/Library/MediaSourceManager.cs b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+index e9bba05839..7525021e42 100644
+--- a/Emby.Server.Implementations/Library/MediaSourceManager.cs
++++ b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+@@ -19,6 +19,7 @@ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Database.Implementations.Enums;
+ using Jellyfin.Extensions;
+ using Jellyfin.Extensions.Json;
++using Jellyfin.Server.Implementations.Item;
+ using MediaBrowser.Common.Configuration;
+ using MediaBrowser.Common.Extensions;
+ using MediaBrowser.Controller;
+@@ -40,7 +41,7 @@ using Microsoft.Extensions.Logging;
+ 
+ namespace Emby.Server.Implementations.Library
+ {
+-    public class MediaSourceManager : IMediaSourceManager, IDisposable
++    public class MediaSourceManager : IMediaSourceManager, IMediaStreamPrefetch, IDisposable
+     {
+         // Do not use a pipe here because Roku http requests to the server will fail, without any explicit error message.
+         private const char LiveStreamIdDelimiter = '_';
+@@ -94,13 +95,58 @@ namespace Emby.Server.Implementations.Library
+             _mediaAttachmentRepository = mediaAttachmentRepository;
+         }
+ 
++        /// <summary>
++        /// Media streams batch-read for the items of the current request, keyed by item id.
++        /// Set by <see cref="PrefetchMediaStreams"/>; consulted by <see cref="GetMediaStreams(MediaStreamQuery)"/>.
++        /// </summary>
++        private static readonly AsyncLocal<Dictionary<Guid, IReadOnlyList<MediaStream>>> _prefetchedStreams = new();
++
+         public void AddParts(IEnumerable<IMediaSourceProvider> providers)
+         {
+             _providers = providers.ToArray();
+         }
+ 
++        /// <inheritdoc />
++        public IDisposable PrefetchMediaStreams(IReadOnlyList<Guid> itemIds)
++        {
++            if (itemIds.Count == 0 || _mediaStreamRepository is not MediaStreamRepository repository)
++            {
++                return NoopPrefetch.Instance;
++            }
++
++            var batch = repository.GetMediaStreamsByItems(itemIds);
++            var prefetched = new Dictionary<Guid, IReadOnlyList<MediaStream>>(itemIds.Count);
++            foreach (var itemId in itemIds)
++            {
++                // An item the batch did not return has no streams. Record that, so the lookup
++                // below does not fall through to a per-item query for exactly the empty case.
++                var streams = batch.GetValueOrDefault(itemId) ?? Array.Empty<MediaStream>();
++                foreach (var stream in streams)
++                {
++                    stream.SupportsExternalStream = StreamSupportsExternalStream(stream);
++                }
++
++                prefetched[itemId] = streams;
++            }
++
++            var previous = _prefetchedStreams.Value;
++            _prefetchedStreams.Value = prefetched;
++            return new PrefetchScope(() => _prefetchedStreams.Value = previous);
++        }
++
+         public IReadOnlyList<MediaStream> GetMediaStreams(MediaStreamQuery query)
+         {
++            // A whole-item read inside a prefetch scope is answered from the batch. The scope is
++            // AsyncLocal, so it is confined to the request that opened it: nothing is cached across
++            // requests and there is no staleness window to reason about.
++            if (query.Index is null
++                && query.Type is null
++                && _prefetchedStreams.Value is { } prefetched
++                && prefetched.TryGetValue(query.ItemId, out var fromBatch))
++            {
++                return fromBatch;
++            }
++
+             var list = _mediaStreamRepository.GetMediaStreams(query);
+ 
+             foreach (var stream in list)
+@@ -1066,5 +1112,31 @@ namespace Emby.Server.Implementations.Library
+                 _liveStreamLocker.Dispose();
+             }
+         }
++
++        private sealed class PrefetchScope : IDisposable
++        {
++            private Action _onDispose;
++
++            public PrefetchScope(Action onDispose)
++            {
++                _onDispose = onDispose;
++            }
++
++            public void Dispose()
++            {
++                _onDispose?.Invoke();
++                _onDispose = null;
++            }
++        }
++
++        private sealed class NoopPrefetch : IDisposable
++        {
++            public static readonly NoopPrefetch Instance = new();
++
++            public void Dispose()
++            {
++            }
++        }
++
+     }
+ }
+diff --git a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
+index a25629132b..7bc17b08e8 100644
+--- a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
++++ b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
+@@ -55,6 +55,39 @@ public class MediaStreamRepository : IMediaStreamRepository
+         return TranslateQuery(context.MediaStreamInfos.AsNoTracking(), filter).AsEnumerable().Select(Map).ToArray();
+     }
+ 
++    /// <summary>
++    /// Gets the media streams of many items in one query.
++    /// </summary>
++    /// <remarks>
++    /// Not on <see cref="IMediaStreamRepository"/>: that interface lives in MediaBrowser.Controller,
++    /// which plugins bind against, and this fork keeps that assembly untouched. Callers reach it by
++    /// type-testing the repository they were given.
++    /// </remarks>
++    /// <param name="itemIds">The item ids.</param>
++    /// <returns>The streams of each item that has any, in stream-index order.</returns>
++    public IReadOnlyDictionary<Guid, IReadOnlyList<MediaStream>> GetMediaStreamsByItems(IReadOnlyList<Guid> itemIds)
++    {
++        if (itemIds.Count == 0)
++        {
++            return ImmutableDictionary<Guid, IReadOnlyList<MediaStream>>.Empty;
++        }
++
++        using var context = _dbProvider.CreateDbContext();
++        var result = new Dictionary<Guid, IReadOnlyList<MediaStream>>(itemIds.Count);
++        foreach (var group in context.MediaStreamInfos
++                     .AsNoTracking()
++                     .Where(e => itemIds.Contains(e.ItemId))
++                     .OrderBy(e => e.ItemId)
++                     .ThenBy(e => e.StreamIndex)
++                     .AsEnumerable()
++                     .GroupBy(e => e.ItemId))
++        {
++            result[group.Key] = group.Select(Map).ToArray();
++        }
++
++        return result;
++    }
++
+     /// <inheritdoc />
+     public IReadOnlyList<string> GetMediaStreamLanguages(MediaStreamType mediaStreamType)
+     {

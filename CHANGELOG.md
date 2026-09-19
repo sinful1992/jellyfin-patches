@@ -3,6 +3,28 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p2 — 2026-09-20
+
+Base `v12.1` · image `jellyfin-patched:12.1-p2`
+Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
+
+**First performance commits in the series, and the first chosen from measurement of this
+server rather than from upstream's tracker.** With the app's real list field set, a
+134-episode series list took 590 ms; ~275 ms was one `TrickplayInfos` query per media
+source (trickplay is off here — the cost is round-trips) and ~276 ms was one
+`MediaStreamInfos` query per item under `MediaSources`. Two new commits:
+
+- **Read a page's media streams in one query instead of one per item** — `MediaStreamRepository`
+  batch query + a request-scoped (`AsyncLocal`) prefetch in `MediaSourceManager` that every
+  whole-item stream read is answered from while the page is built. No cross-request cache.
+- **Fetch a page's trickplay manifests with one query instead of one per media source** —
+  `TrickplayManager.GetTrickplayManifests(items)`, same manifest shape as the per-item path.
+
+**Replaced assembly set grows 2 → 3:** `Jellyfin.Server.Implementations.dll` joins
+`Emby.Server.Implementations.dll` and `Jellyfin.Api.dll`. `MediaBrowser.Controller` — the
+assembly plugins bind against — is deliberately untouched: the new members sit on concrete
+classes and an internal contract, reached by type test.
+
 ## 12.1-p1 — 2026-09-19
 
 Base `v12.1` · image `jellyfin-patched:12.1-p1`

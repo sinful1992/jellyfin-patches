@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 20 Sep 2026 00:46:15 +0100
+Subject: [PATCH] Fetch a page's trickplay manifests with one query instead of
+ one per media source
+
+The DTO loop called GetTrickplayManifest per item: item.GetMediaSources
+again, then a database context and query per media source, synchronously
+over async, inside the loop. ~275 ms of a 590 ms full-series episode
+list on this server, for a feature that is switched off here -- the cost
+is the round-trips, not the data.
+
+TrickplayManager gains GetTrickplayManifests(items): the same media
+source enumeration per item, one TrickplayInfos query for all of them,
+and the same manifest shape (sources without trickplay omitted, an empty
+manifest for an item with none). DtoService fetches it once per page and
+hands it down; the single-item path is unchanged. Not on
+ITrickplayManager, which lives in MediaBrowser.Controller.
+---
+ Emby.Server.Implementations/Dto/DtoService.cs | 30 ++++++--
+ .../Trickplay/TrickplayManager.cs             | 77 +++++++++++++++++++
+ 2 files changed, 102 insertions(+), 5 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
+index 673b6882de..915f8d887f 100644
+--- a/Emby.Server.Implementations/Dto/DtoService.cs
++++ b/Emby.Server.Implementations/Dto/DtoService.cs
+@@ -11,6 +11,7 @@ using Emby.Server.Implementations.Library;
+ using Jellyfin.Data.Enums;
+ using Jellyfin.Database.Implementations.Entities;
+ using Jellyfin.Extensions;
++using Jellyfin.Server.Implementations.Trickplay;
+ using MediaBrowser.Common;
+ using MediaBrowser.Controller.Channels;
+ using MediaBrowser.Controller.Chapters;
+@@ -262,6 +263,18 @@ namespace Emby.Server.Implementations.Dto
+                 }
+             }
+ 
++            // Batch-fetch trickplay manifests: the per-item path opens a database context per media
++            // source, synchronously, inside this loop. One query for the page instead.
++            IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null;
++            if (options.ContainsField(ItemFields.Trickplay) && _trickplayManager is TrickplayManager trickplayManager)
++            {
++                var videos = accessibleItems.Where(i => i is Video).ToList();
++                if (videos.Count > 1)
++                {
++                    trickplayBatch = trickplayManager.GetTrickplayManifests(videos).GetAwaiter().GetResult();
++                }
++            }
++
+             // Batch-detect which videos own alternate versions to avoid the per-item alternate-version
+             // queries in MediaSourceCount. Videos absent from this set have a single media source.
+             IReadOnlySet<Guid>? alternateVersionItemIds = null;
+@@ -289,7 +302,8 @@ namespace Emby.Server.Implementations.Dto
+                     artistsBatch,
+                     resumeDataBatch?.GetValueOrDefault(item.Id),
+                     peopleBatch,
+-                    alternateVersionItemIds);
++                    alternateVersionItemIds,
++                    trickplayBatch);
+ 
+                 if (item is LiveTvChannel tvChannel)
+                 {
+@@ -383,7 +397,8 @@ namespace Emby.Server.Implementations.Dto
+             IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null,
+             VersionResumeData? resumeData = null,
+             IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
+-            IReadOnlySet<Guid>? alternateVersionItemIds = null)
++            IReadOnlySet<Guid>? alternateVersionItemIds = null,
++            IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null)
+         {
+             var dto = new BaseItemDto
+             {
+@@ -452,7 +467,7 @@ namespace Emby.Server.Implementations.Dto
+                 AttachStudios(dto, item);
+             }
+ 
+-            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds);
++            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds, trickplayBatch);
+ 
+             if (options.ContainsField(ItemFields.CanDelete))
+             {
+@@ -1143,7 +1158,8 @@ namespace Emby.Server.Implementations.Dto
+         /// <param name="artistsBatch">Optional pre-fetched artist lookup shared across a batch of items.</param>
+         /// <param name="user">The user, for per-user values such as the accessible media source count.</param>
+         /// <param name="alternateVersionItemIds">Optional pre-fetched set of item IDs that own alternate versions, shared across a batch of items.</param>
+-        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null)
++        /// <param name="trickplayBatch">Trickplay manifests fetched for the whole page, or null on the single-item path.</param>
++        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null, IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>? trickplayBatch = null)
+         {
+             if (options.ContainsField(ItemFields.DateCreated))
+             {
+@@ -1483,7 +1499,11 @@ namespace Emby.Server.Implementations.Dto
+ 
+                 if (options.ContainsField(ItemFields.Trickplay))
+                 {
+-                    var trickplay = _trickplayManager.GetTrickplayManifest(item).GetAwaiter().GetResult();
++                    // The page path fetched every item's manifest up front; a miss there means the
++                    // item was not part of the batch, not that it has no trickplay.
++                    var trickplay = trickplayBatch is not null && trickplayBatch.TryGetValue(item.Id, out var batched)
++                        ? batched
++                        : _trickplayManager.GetTrickplayManifest(item).GetAwaiter().GetResult();
+                     dto.Trickplay = trickplay.ToDictionary(
+                         mediaStream => mediaStream.Key,
+                         mediaStream => mediaStream.Value.ToDictionary(
+diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+index 58b9f7f822..a2c86a62db 100644
+--- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
++++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+@@ -747,6 +747,83 @@ public partial class TrickplayManager : ITrickplayManager
+         return trickplayManifest;
+     }
+ 
++    /// <summary>
++    /// Gets the trickplay manifests of many items with one database query.
++    /// </summary>
++    /// <remarks>
++    /// Same result per item as <see cref="GetTrickplayManifest"/>: keyed by media source id, sources
++    /// with no trickplay omitted, an empty manifest for an item with none. Not on
++    /// <see cref="ITrickplayManager"/>, which lives in MediaBrowser.Controller -- the assembly plugins
++    /// bind against, left untouched by this fork. Callers type-test for this class.
++    /// </remarks>
++    /// <param name="items">The items.</param>
++    /// <returns>Each item's manifest, keyed by item id.</returns>
++    public async Task<IReadOnlyDictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>> GetTrickplayManifests(IReadOnlyList<BaseItem> items)
++    {
++        // Media source ids per item, exactly as the single-item path enumerates them.
++        var sourcesByItem = new Dictionary<Guid, List<(string Id, Guid Guid)>>(items.Count);
++        var allSourceIds = new HashSet<Guid>();
++        foreach (var item in items)
++        {
++            var sources = new List<(string, Guid)>();
++            foreach (var mediaSource in item.GetMediaSources(false))
++            {
++                if (mediaSource.IsRemote || !Guid.TryParse(mediaSource.Id, out var mediaSourceId))
++                {
++                    continue;
++                }
++
++                sources.Add((mediaSource.Id, mediaSourceId));
++                allSourceIds.Add(mediaSourceId);
++            }
++
++            sourcesByItem[item.Id] = sources;
++        }
++
++        var resolutionsBySource = new Dictionary<Guid, Dictionary<int, TrickplayInfo>>();
++        if (allSourceIds.Count > 0)
++        {
++            var ids = allSourceIds.ToList();
++            var dbContext = await _dbProvider.CreateDbContextAsync().ConfigureAwait(false);
++            await using (dbContext.ConfigureAwait(false))
++            {
++                var infos = await dbContext.TrickplayInfos
++                    .AsNoTracking()
++                    .Where(i => ids.Contains(i.ItemId))
++                    .ToListAsync()
++                    .ConfigureAwait(false);
++
++                foreach (var info in infos)
++                {
++                    if (!resolutionsBySource.TryGetValue(info.ItemId, out var byWidth))
++                    {
++                        byWidth = new Dictionary<int, TrickplayInfo>();
++                        resolutionsBySource[info.ItemId] = byWidth;
++                    }
++
++                    byWidth[info.Width] = info;
++                }
++            }
++        }
++
++        var manifests = new Dictionary<Guid, Dictionary<string, Dictionary<int, TrickplayInfo>>>(items.Count);
++        foreach (var (itemId, sources) in sourcesByItem)
++        {
++            var manifest = new Dictionary<string, Dictionary<int, TrickplayInfo>>();
++            foreach (var (id, guid) in sources)
++            {
++                if (resolutionsBySource.TryGetValue(guid, out var resolutions) && resolutions.Count > 0)
++                {
++                    manifest[id] = resolutions;
++                }
++            }
++
++            manifests[itemId] = manifest;
++        }
++
++        return manifests;
++    }
++
+     /// <inheritdoc />
+     public async Task<string> GetTrickplayTilePathAsync(BaseItem item, int width, int index, bool saveWithMedia)
+     {
