@@ -1,0 +1,50 @@
+{
+  "version": "12.1-p1",
+  "released": "2026-09-19",
+  "base_tag": "v12.1",
+  "base_image": "lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95",
+  "image": "jellyfin-patched:12.1-p1",
+  "series_branch": "patched/12.1",
+  "series": [
+    {
+      "sha": "fd11a87e8f6379200fa4b932310bb8499c8aa23a",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "0a6bf71e8f87a96055fc364471d3f51947aafa5e",
+      "backport_of": null
+    },
+    {
+      "sha": "72b8596d2e27cd9f110bd5cbbfae81c8e96d0574",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "95bdda6b35a1390d298264c8c011119f628e3679",
+      "backport_of": null
+    },
+    {
+      "sha": "2bef77593a9ac92b3944e3bab388d48e9d89a94f",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "be1c49c449dd6991936969b6ab109b469cf3e857",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll"
+  ],
+  "tooling": [
+    "Move the series to 12.1; derive base and series from VERSION everywhere",
+    "Measure seek accuracy on the path that actually runs",
+    "Watch the files the series actually touches, and look back past the last scan",
+    "Compare Intro Skipper against what is installed, not what we remembered",
+    "Watch the Intro Skipper line we actually run",
+    "Deploy 12.0-p1 to the live server",
+    "Functionally test 12.0-p1 on the pairing that actually ships",
+    "Don't attribute the stale read to upstream's restructure",
+    "Record the userdata reproduction attempt: still open, with one real finding"
+  ],
+  "repo_commit": "002c72fe1c3653e6cd6dccadee06a5ddeb56c5ce"
+}

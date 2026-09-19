@@ -8,6 +8,12 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p1`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**DEPLOYED 2026-09-19 23:29.** Live server migrated 12.0 → 12.1 (3 code migrations,
+`StripEmbeddedLinkedChildren` cleaned 2768 items), startup 15 s, 0 `[ERR]`/`[FTL]`, `vaapi`
+intact, Intro Skipper 12.0.4.0 loaded unchanged, auth patch 401 ×3 live, PlaybackInfo → 206.
+Pre-migration backup: `/mnt/data/docker-data/_jellyfin-pre-12.1-backup-20260919-232810`
+(full config minus `cache/` + `transcodes/`; 4.5G). `jellyfin-patched:12.0-p1` kept on disk.
+
 **Base bump: 12.0 → 12.1.** Upstream tagged `v12.1` on 2026-09-15 (47 PRs / 148 files)
 and LinuxServer published `12.1ubu2604-ls50` the same day. The 12.0→12.1 diff touches
 **none** of the 12 files the series changes; `patched/12.1` is `patched/12.0` rebased onto
@@ -39,6 +45,21 @@ load unchanged. Verified at deploy, not assumed — the smoke test does not chec
 - Watcher: the Intro Skipper line is picked at run time (newest line ≤ our base that
   exists), so a base bump to 12.1 keeps watching `12.0/` instead of reporting an empty
   `12.1/` line every day.
+
+Series diff vs the previous manifest (`10.11.11-p5` — `12.0-p1` was cut by hand and has
+none): the two "removed" commits went at 12.0, and the two "changed" ones differ only in
+patch-id, which is not stable across a base bump.
+
+<details><summary>Contains 4 change(s)</summary>
+
+- Add a stream-ticket authorization policy
+- Issue a stream ticket when playback info is requested
+- Require a stream ticket on the media endpoints
+- Add regression tests for media endpoint authentication
+
+</details>
+
+Assemblies replaced: Emby.Server.Implementations.dll, Jellyfin.Api.dll
 
 ## 12.0-p1 — 2026-09-09
 

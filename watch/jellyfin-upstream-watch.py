@@ -322,7 +322,9 @@ def _base_image_tag():
 
 def _lsio_tags():
     """Release-tag images LinuxServer has published: {'12.1': ['12.1ubu2604-ls50', ...]}."""
-    rels = get("https://api.github.com/repos/linuxserver/docker-jellyfin/releases?per_page=30")
+    # 100, not 30: the feed is mostly nightly-* tags, and a release tag pushed off the
+    # page would make the lookups below empty -- silent, which reads as up to date.
+    rels = get("https://api.github.com/repos/linuxserver/docker-jellyfin/releases?per_page=100")
     out = {}
     for r in rels:
         m = re.fullmatch(r"(\d+(?:\.\d+)+)ubu\d+-ls(\d+)", r["tag_name"])
@@ -361,7 +363,15 @@ def check_base_image(state, findings):
 
     if pinned_tag:
         mine = sorted(tags.get(PINNED, []), key=lambda t: int(t.rsplit("-ls", 1)[1]))
-        if mine and mine[-1] != pinned_tag and _ls_num(mine[-1]) > _ls_num(pinned_tag):
+        if not mine:
+            # Our own base tag not in the feed at all: the check is blind, say so once.
+            if state.get("last_base_rebuild") != "unlisted":
+                findings.append(
+                    f"**LinuxServer's release feed lists no `{PINNED}ubu*` tag** (BASE_IMAGE pins "
+                    f"`{pinned_tag}`; {len(rels)} releases scanned) -- this check cannot see "
+                    f"base rebuilds until it does. FYI, nothing to act on.")
+            state["last_base_rebuild"] = "unlisted"
+        elif mine[-1] != pinned_tag and _ls_num(mine[-1]) > _ls_num(pinned_tag):
             key = f"{pinned_tag}->{mine[-1]}"
             if state.get("last_base_rebuild") != key:
                 findings.append(
