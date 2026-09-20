@@ -43,6 +43,21 @@ most once a minute while a stream slides a ticket, reloaded at startup minus exp
 assembly plugins bind against — is deliberately untouched: batch loaders sit on the concrete
 classes, reached by type test.
 
+<details><summary>Contains 8 change(s)</summary>
+
+- Add a stream-ticket authorization policy
+- Issue a stream ticket when playback info is requested
+- Require a stream ticket on the media endpoints
+- Add regression tests for media endpoint authentication
+- Batch the reads GetMediaSources repeats per item across a page of DTOs
+- Fetch a page's trickplay manifests with one query instead of one per media source
+- Fetch a page's chapters with one query instead of one per item
+- Persist stream tickets so a server restart does not revoke them
+
+</details>
+
+Assemblies replaced: Emby.Server.Implementations.dll, Jellyfin.Api.dll, Jellyfin.Server.Implementations.dll
+
 ## 12.1-p1 — 2026-09-19
 
 Base `v12.1` · image `jellyfin-patched:12.1-p1`

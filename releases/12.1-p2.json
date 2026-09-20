@@ -1,0 +1,73 @@
+{
+  "version": "12.1-p2",
+  "released": "2026-09-20",
+  "base_tag": "v12.1",
+  "base_image": "lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95",
+  "image": "jellyfin-patched:12.1-p2",
+  "series_branch": "patched/12.1",
+  "series": [
+    {
+      "sha": "fd11a87e8f6379200fa4b932310bb8499c8aa23a",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "0a6bf71e8f87a96055fc364471d3f51947aafa5e",
+      "backport_of": null
+    },
+    {
+      "sha": "72b8596d2e27cd9f110bd5cbbfae81c8e96d0574",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "95bdda6b35a1390d298264c8c011119f628e3679",
+      "backport_of": null
+    },
+    {
+      "sha": "2bef77593a9ac92b3944e3bab388d48e9d89a94f",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "be1c49c449dd6991936969b6ab109b469cf3e857",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    },
+    {
+      "sha": "f9c77c8e5737169df226fc4d0421fa16f4af4b89",
+      "subject": "Batch the reads GetMediaSources repeats per item across a page of DTOs",
+      "patch_id": "46f3bbdcfa1a286ec7539cd3835177e99a057947",
+      "backport_of": null
+    },
+    {
+      "sha": "f8deee7a9573952b1ff562023fd4d0cdcc3dea9a",
+      "subject": "Fetch a page's trickplay manifests with one query instead of one per media source",
+      "patch_id": "0a86c307ddab30bdb06cbc3dac1639d37ac8081c",
+      "backport_of": null
+    },
+    {
+      "sha": "dbc19d3ab227ea65ccf28cb6f27809fc6149abd8",
+      "subject": "Fetch a page's chapters with one query instead of one per item",
+      "patch_id": "84cd0126492d8d7e16af1e1194efd114166d74d9",
+      "backport_of": null
+    },
+    {
+      "sha": "8d8c9d9935c6b341df21a42a1b517b3b1b82e44d",
+      "subject": "Persist stream tickets so a server restart does not revoke them",
+      "patch_id": "4ab42a585321090b0cb7e3c017b116fd47177fc1",
+      "backport_of": null
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll",
+    "Jellyfin.Server.Implementations.dll"
+  ],
+  "tooling": [
+    "Persist stream tickets across restarts (12.1-p2)",
+    "Order batch queries on a unique key and use WhereOneOrMany; state the verification limit",
+    "Batch every per-item read on the DTO page path (12.1-p2 series, second cut)",
+    "Batch media stream and trickplay reads across a page (12.1-p2)",
+    "Note that the 12.1 rollback snapshot predates the access-log config",
+    "Log every request's route, query and duration to its own file, and report on it",
+    "Install the .NET SDK the base actually needs in the release workflow"
+  ],
+  "repo_commit": "840df7f911e0edbcfdf2cd3b3f169fc1b4c0ac4f"
+}
