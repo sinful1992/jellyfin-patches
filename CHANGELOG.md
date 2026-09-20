@@ -8,6 +8,8 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p2`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**DEPLOYED 2026-09-20 01:36** (idle-gated; an earlier cut went live at 01:08 over an active session — see the ticket defect below). Live: 0 errors, 401 ×3, persistent tickets writing, `h264_vaapi`, Suits list 590 → 160 ms, movie grid 330 → 160 ms. Rollback = `image: jellyfin-patched:12.1-p1`, no migrations.
+
 **First performance commits in the series, chosen from measuring this server rather than
 upstream's tracker.** EF command logging on a 134-episode series list with the Android TV
 app's field set: **~1,480 database commands for one request, ~1 s, of which the database itself
