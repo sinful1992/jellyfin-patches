@@ -29,6 +29,15 @@ shapes (series list, season, movie grid, NextUp, audio, single item, streams-onl
 collection links), so the batched alternate-version path returned empty on every compared request
 — it is exercised for correctness only when two versions of a film are merged.
 
+**Also fixed — a defect in our own auth patch, found by the deploy of this very image:**
+stream tickets lived in memory, so **every server restart revoked them** and any client that
+fetches its direct-play stream uncredentialed (the Android TV app) fell into a loop of 401s
+until the user pressed play again. Seen live 2026-09-20 01:08, bedroom TV, two minutes dark.
+True of every fork image since `10.11.11-p1`; never noticed because restarts happened at night.
+`StreamTicketStore` now persists to `data/stream-tickets.json` (written on issue, refreshed at
+most once a minute while a stream slides a ticket, reloaded at startup minus expired entries);
+4 new unit tests. Series is now **8 commits**.
+
 **Replaced assembly set grows 2 → 3:** `Jellyfin.Server.Implementations.dll` joins
 `Emby.Server.Implementations.dll` and `Jellyfin.Api.dll`. `MediaBrowser.Controller` — the
 assembly plugins bind against — is deliberately untouched: batch loaders sit on the concrete

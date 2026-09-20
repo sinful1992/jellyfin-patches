@@ -1,0 +1,298 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 20 Sep 2026 01:13:41 +0100
+Subject: [PATCH] Persist stream tickets so a server restart does not revoke
+ them
+
+The Android TV app fetches a direct-play stream with no credentials at
+all, relying on the ticket issued at PlaybackInfo. With the ticket table
+in memory only, every restart of the server turned an in-progress
+playback into a loop of 401s until the user pressed play again. Seen
+live on 2026-09-20 01:08: a restart during an episode, then one stream
+request every five seconds rejected for two minutes. Stock Jellyfin has
+no such failure because it has no such check; the fork must not add one.
+
+StreamTicketStore now writes its table to data/stream-tickets.json --
+on every issue, and at most once a minute while an in-flight stream
+slides a ticket -- as a temp file moved into place, and reloads it at
+construction, dropping anything already expired. A corrupt or missing
+file starts empty; clients renegotiate. The parameterless constructor
+keeps the memory-only behaviour for tests. ApplicationHost registers the
+persistent form explicitly.
+---
+ .../ApplicationHost.cs                        |   4 +-
+ .../StreamAccessPolicy/StreamTicketStore.cs   | 124 ++++++++++++++++++
+ .../StreamTicketStoreTests.cs                 |  79 +++++++++++
+ 3 files changed, 206 insertions(+), 1 deletion(-)
+ create mode 100644 tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/StreamTicketStoreTests.cs
+
+diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
+index 2cb119b87f..d4be59f641 100644
+--- a/Emby.Server.Implementations/ApplicationHost.cs
++++ b/Emby.Server.Implementations/ApplicationHost.cs
+@@ -636,7 +636,9 @@ namespace Emby.Server.Implementations
+             // AddJellyfinApiAuthorization because AuthorizationOptions composes across every
+             // Configure delegate, and this keeps the change inside the assemblies the local
+             // build already replaces.
+-            serviceCollection.AddSingleton<IStreamTicketStore, StreamTicketStore>();
++            serviceCollection.AddSingleton<IStreamTicketStore>(sp => new StreamTicketStore(
++                sp.GetRequiredService<IApplicationPaths>(),
++                sp.GetRequiredService<ILogger<StreamTicketStore>>()));
+             serviceCollection.AddSingleton<IAuthorizationHandler, StreamAccessHandler>();
+             serviceCollection.Configure<AuthorizationOptions>(options =>
+             {
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
+index 8786b50185..e444db2056 100644
+--- a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
+@@ -1,9 +1,13 @@
+ using System;
+ using System.Collections.Concurrent;
+ using System.Collections.Generic;
++using System.IO;
+ using System.Net;
++using System.Text.Json;
+ using System.Threading;
+ using Jellyfin.Extensions;
++using MediaBrowser.Common.Configuration;
++using Microsoft.Extensions.Logging;
+ 
+ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+ {
+@@ -28,10 +32,54 @@ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+ 
+         private static readonly TimeSpan _pruneInterval = TimeSpan.FromMinutes(5);
+ 
++        /// <summary>
++        /// How often a ticket slid by an in-flight stream is written back to disk. Issue always
++        /// writes; a slide only refreshes a ticket that was already on disk, so it can wait.
++        /// </summary>
++        private static readonly TimeSpan _slideSaveInterval = TimeSpan.FromMinutes(1);
++
+         private readonly ConcurrentDictionary<TicketKey, DateTimeOffset> _tickets = new();
+ 
++        private readonly string? _path;
++
++        private readonly ILogger<StreamTicketStore>? _logger;
++
++        private readonly object _saveLock = new();
++
+         private long _lastPruneTicks = DateTimeOffset.UtcNow.UtcTicks;
+ 
++        private long _lastSaveTicks;
++
++        /// <summary>
++        /// Initializes a new instance of the <see cref="StreamTicketStore"/> class that keeps
++        /// tickets in memory only.
++        /// </summary>
++        public StreamTicketStore()
++        {
++        }
++
++        /// <summary>
++        /// Initializes a new instance of the <see cref="StreamTicketStore"/> class that persists
++        /// tickets under the data path, so a server restart does not revoke them.
++        /// </summary>
++        /// <remarks>
++        /// Clients such as the Android TV app fetch a direct-play stream with no credentials at all,
++        /// relying on the ticket issued at PlaybackInfo. With the table in memory only, every restart
++        /// turned an in-progress playback into a loop of 401s until the user pressed play again --
++        /// seen live on 2026-09-20. Stock Jellyfin has no such failure because it has no such check;
++        /// the fork must not introduce one.
++        /// </remarks>
++        /// <param name="applicationPaths">The application paths.</param>
++        /// <param name="logger">The logger.</param>
++        public StreamTicketStore(IApplicationPaths applicationPaths, ILogger<StreamTicketStore> logger)
++        {
++            ArgumentNullException.ThrowIfNull(applicationPaths);
++
++            _path = Path.Combine(applicationPaths.DataPath, "stream-tickets.json");
++            _logger = logger;
++            Load();
++        }
++
+         /// <inheritdoc />
+         public void Issue(IPAddress? remoteAddress, Guid userId, IReadOnlyList<Guid> ids)
+         {
+@@ -51,6 +99,7 @@ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+             }
+ 
+             Prune();
++            Save();
+         }
+ 
+         /// <inheritdoc />
+@@ -86,6 +135,11 @@ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+                 redeemed = true;
+             }
+ 
++            if (redeemed && now - new DateTimeOffset(Interlocked.Read(ref _lastSaveTicks), TimeSpan.Zero) >= _slideSaveInterval)
++            {
++                Save();
++            }
++
+             return redeemed;
+         }
+ 
+@@ -113,6 +167,76 @@ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+             }
+         }
+ 
++        private void Load()
++        {
++            if (_path is null || !File.Exists(_path))
++            {
++                return;
++            }
++
++            try
++            {
++                var now = DateTimeOffset.UtcNow;
++                var loaded = 0;
++                using var stream = File.OpenRead(_path);
++                foreach (var ticket in JsonSerializer.Deserialize<List<PersistedTicket>>(stream) ?? [])
++                {
++                    if (ticket.Expiry > now && ticket.Address is not null)
++                    {
++                        _tickets[new TicketKey(ticket.Address, ticket.Id)] = ticket.Expiry;
++                        loaded++;
++                    }
++                }
++
++                _logger?.LogInformation("Restored {Count} stream ticket(s) from {Path}", loaded, _path);
++            }
++            catch (Exception ex)
++            {
++                // A corrupt file costs the tickets it held, nothing more: clients renegotiate.
++                _logger?.LogWarning(ex, "Could not read stream tickets from {Path}; starting empty", _path);
++            }
++        }
++
++        private void Save()
++        {
++            if (_path is null)
++            {
++                return;
++            }
++
++            lock (_saveLock)
++            {
++                try
++                {
++                    var now = DateTimeOffset.UtcNow;
++                    var tickets = new List<PersistedTicket>(_tickets.Count);
++                    foreach (var (key, expiry) in _tickets)
++                    {
++                        if (expiry > now)
++                        {
++                            tickets.Add(new PersistedTicket(key.Address, key.Id, expiry));
++                        }
++                    }
++
++                    // Write beside, then move over: a crash mid-write must not leave a torn file.
++                    var temp = _path + ".tmp";
++                    using (var stream = File.Create(temp))
++                    {
++                        JsonSerializer.Serialize(stream, tickets);
++                    }
++
++                    File.Move(temp, _path, overwrite: true);
++                    Interlocked.Exchange(ref _lastSaveTicks, now.UtcTicks);
++                }
++                catch (Exception ex)
++                {
++                    _logger?.LogWarning(ex, "Could not write stream tickets to {Path}", _path);
++                }
++            }
++        }
++
+         private readonly record struct TicketKey(string Address, Guid Id);
++
++        private sealed record PersistedTicket(string Address, Guid Id, DateTimeOffset Expiry);
+     }
+ }
+diff --git a/tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/StreamTicketStoreTests.cs b/tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/StreamTicketStoreTests.cs
+new file mode 100644
+index 0000000000..5cc3687d66
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/StreamTicketStoreTests.cs
+@@ -0,0 +1,79 @@
++using System;
++using System.IO;
++using System.Net;
++using Jellyfin.Api.Auth.StreamAccessPolicy;
++using MediaBrowser.Common.Configuration;
++using Microsoft.Extensions.Logging.Abstractions;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Auth.StreamAccessPolicy
++{
++    public sealed class StreamTicketStoreTests : IDisposable
++    {
++        private readonly string _dataPath = Path.Combine(Path.GetTempPath(), "jf-tickets-" + Guid.NewGuid().ToString("N"));
++        private readonly IApplicationPaths _paths;
++
++        public StreamTicketStoreTests()
++        {
++            Directory.CreateDirectory(_dataPath);
++            var paths = new Mock<IApplicationPaths>();
++            paths.Setup(p => p.DataPath).Returns(_dataPath);
++            _paths = paths.Object;
++        }
++
++        [Fact]
++        public void Ticket_SurvivesRestart()
++        {
++            var address = IPAddress.Parse("192.168.1.10");
++            var itemId = Guid.NewGuid();
++
++            var before = new StreamTicketStore(_paths, NullLogger<StreamTicketStore>.Instance);
++            before.Issue(address, Guid.NewGuid(), [itemId]);
++
++            // A new store from the same data path is what a restart produces.
++            var after = new StreamTicketStore(_paths, NullLogger<StreamTicketStore>.Instance);
++
++            Assert.True(after.TryRedeem(address, [itemId]));
++            Assert.False(after.TryRedeem(IPAddress.Parse("192.168.1.11"), [itemId]));
++            Assert.False(after.TryRedeem(address, [Guid.NewGuid()]));
++        }
++
++        [Fact]
++        public void ExpiredTicket_IsNotRestored()
++        {
++            var address = IPAddress.Parse("192.168.1.10");
++            var itemId = Guid.NewGuid();
++            var file = Path.Combine(_dataPath, "stream-tickets.json");
++            File.WriteAllText(file, $"[{{\"Address\":\"{address}\",\"Id\":\"{itemId}\",\"Expiry\":\"{DateTimeOffset.UtcNow.AddMinutes(-1):O}\"}}]");
++
++            var store = new StreamTicketStore(_paths, NullLogger<StreamTicketStore>.Instance);
++
++            Assert.False(store.TryRedeem(address, [itemId]));
++        }
++
++        [Fact]
++        public void CorruptFile_StartsEmpty()
++        {
++            File.WriteAllText(Path.Combine(_dataPath, "stream-tickets.json"), "not json");
++
++            var store = new StreamTicketStore(_paths, NullLogger<StreamTicketStore>.Instance);
++
++            Assert.False(store.TryRedeem(IPAddress.Loopback, [Guid.NewGuid()]));
++        }
++
++        [Fact]
++        public void MemoryOnlyStore_WritesNothing()
++        {
++            var store = new StreamTicketStore();
++            store.Issue(IPAddress.Loopback, Guid.NewGuid(), [Guid.NewGuid()]);
++
++            Assert.Empty(Directory.GetFiles(_dataPath));
++        }
++
++        public void Dispose()
++        {
++            Directory.Delete(_dataPath, recursive: true);
++        }
++    }
++}
