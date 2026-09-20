@@ -14,9 +14,9 @@ single-item path is unchanged; IChapterManager and IChapterRepository
 (MediaBrowser.Controller) are not touched.
 ---
  .../Chapters/ChapterManager.cs                | 17 +++++++++
- Emby.Server.Implementations/Dto/DtoService.cs | 24 ++++++++++---
- .../Item/ChapterRepository.cs                 | 36 +++++++++++++++++++
- 3 files changed, 72 insertions(+), 5 deletions(-)
+ Emby.Server.Implementations/Dto/DtoService.cs | 24 +++++++++---
+ .../Item/ChapterRepository.cs                 | 37 +++++++++++++++++++
+ 3 files changed, 73 insertions(+), 5 deletions(-)
 
 diff --git a/Emby.Server.Implementations/Chapters/ChapterManager.cs b/Emby.Server.Implementations/Chapters/ChapterManager.cs
 index 69cbe533c6..6379724848 100644
@@ -131,10 +131,10 @@ index afd6795ff3..65d1288f0c 100644
  
              if (options.ContainsField(ItemFields.MediaStreams))
 diff --git a/Jellyfin.Server.Implementations/Item/ChapterRepository.cs b/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
-index f7d76517e1..7447208982 100644
+index f7d76517e1..622a403000 100644
 --- a/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
 +++ b/Jellyfin.Server.Implementations/Item/ChapterRepository.cs
-@@ -66,6 +66,42 @@ public class ChapterRepository : IChapterRepository
+@@ -66,6 +66,43 @@ public class ChapterRepository : IChapterRepository
              .ToArray();
      }
  
@@ -157,9 +157,10 @@ index f7d76517e1..7447208982 100644
 +        using var context = _dbProvider.CreateDbContext();
 +        var result = new Dictionary<Guid, IReadOnlyList<ChapterInfo>>();
 +        foreach (var group in context.Chapters.AsNoTracking()
-+                     .Where(e => itemIds.Contains(e.ItemId))
++                     .WhereOneOrMany(itemIds, e => e.ItemId)
 +                     .OrderBy(e => e.ItemId)
 +                     .ThenBy(e => e.StartPositionTicks)
++                     .ThenBy(e => e.ChapterIndex)
 +                     .Select(e => new
 +                     {
 +                         chapter = e,

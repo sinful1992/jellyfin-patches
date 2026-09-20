@@ -105,7 +105,7 @@ index d8844b01ba..afd6795ff3 100644
                          mediaStream => mediaStream.Key,
                          mediaStream => mediaStream.Value.ToDictionary(
 diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
-index 58b9f7f822..a2c86a62db 100644
+index 58b9f7f822..f5c71ec7c0 100644
 --- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
 +++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
 @@ -747,6 +747,83 @@ public partial class TrickplayManager : ITrickplayManager
@@ -154,7 +154,7 @@ index 58b9f7f822..a2c86a62db 100644
 +            {
 +                var infos = await dbContext.TrickplayInfos
 +                    .AsNoTracking()
-+                    .Where(i => ids.Contains(i.ItemId))
++                    .WhereOneOrMany(ids, i => i.ItemId)
 +                    .ToListAsync()
 +                    .ConfigureAwait(false);
 +

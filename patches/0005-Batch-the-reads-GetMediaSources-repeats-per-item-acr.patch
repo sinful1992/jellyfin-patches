@@ -29,12 +29,12 @@ test, and the readers already live in assemblies this fork replaces.
  Emby.Server.Implementations/Dto/DtoService.cs |  59 +++++++
  .../Library/LibraryManager.cs                 |  27 ++-
  .../Library/MediaSourceManager.cs             |  54 ++++++
- .../Item/LinkedChildrenService.cs             |  34 ++++
+ .../Item/LinkedChildrenService.cs             |  36 ++++
  .../Item/MediaAttachmentRepository.cs         |  33 ++++
  .../Item/MediaStreamRepository.cs             |  33 ++++
  .../Item/PagePrefetch.cs                      | 162 ++++++++++++++++++
  .../MediaSegments/MediaSegmentManager.cs      |  31 ++++
- 8 files changed, 432 insertions(+), 1 deletion(-)
+ 8 files changed, 434 insertions(+), 1 deletion(-)
  create mode 100644 Jellyfin.Server.Implementations/Item/PagePrefetch.cs
 
 diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
@@ -266,10 +266,10 @@ index e9bba05839..f411531e00 100644
          public IReadOnlyList<MediaAttachment> GetMediaAttachments(Guid itemId)
          {
 diff --git a/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs b/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
-index de112d7aa4..ea7371f17b 100644
+index de112d7aa4..349a5b3a53 100644
 --- a/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
 +++ b/Jellyfin.Server.Implementations/Item/LinkedChildrenService.cs
-@@ -60,6 +60,40 @@ public class LinkedChildrenService : ILinkedChildrenService
+@@ -60,6 +60,42 @@ public class LinkedChildrenService : ILinkedChildrenService
              .ToArray();
      }
  
@@ -294,9 +294,11 @@ index de112d7aa4..ea7371f17b 100644
 +        using var dbContext = _dbProvider.CreateDbContext();
 +        var result = new Dictionary<Guid, IReadOnlyList<Guid>>();
 +        foreach (var group in dbContext.LinkedChildren
-+                     .Where(lc => parentIds.Contains(lc.ParentId) && (int)lc.ChildType == childType)
++                     .Where(lc => (int)lc.ChildType == childType)
++                     .WhereOneOrMany(parentIds, lc => lc.ParentId)
 +                     .OrderBy(lc => lc.ParentId)
 +                     .ThenBy(lc => lc.SortOrder)
++                     .ThenBy(lc => lc.ChildId)
 +                     .Select(lc => new { lc.ParentId, lc.ChildId })
 +                     .AsEnumerable()
 +                     .GroupBy(lc => lc.ParentId))
@@ -311,7 +313,7 @@ index de112d7aa4..ea7371f17b 100644
      public IReadOnlySet<Guid> GetItemIdsWithAlternateVersions(IReadOnlyList<Guid> itemIds)
      {
 diff --git a/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs b/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
-index e75dda4392..3a988c5ef8 100644
+index e75dda4392..e2a3707a63 100644
 --- a/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
 +++ b/Jellyfin.Server.Implementations/Item/MediaAttachmentRepository.cs
 @@ -52,6 +52,39 @@ public class MediaAttachmentRepository(IDbContextFactory<JellyfinDbContext> dbPr
@@ -339,7 +341,7 @@ index e75dda4392..3a988c5ef8 100644
 +        var result = new Dictionary<Guid, IReadOnlyList<MediaAttachment>>();
 +        foreach (var group in context.AttachmentStreamInfos
 +                     .AsNoTracking()
-+                     .Where(e => itemIds.Contains(e.ItemId))
++                     .WhereOneOrMany(itemIds, e => e.ItemId)
 +                     .OrderBy(e => e.ItemId)
 +                     .ThenBy(e => e.Index)
 +                     .AsEnumerable()
@@ -355,7 +357,7 @@ index e75dda4392..3a988c5ef8 100644
      {
          return new MediaAttachment()
 diff --git a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
-index a25629132b..139d91d61e 100644
+index a25629132b..17d5a9d89f 100644
 --- a/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
 +++ b/Jellyfin.Server.Implementations/Item/MediaStreamRepository.cs
 @@ -55,6 +55,39 @@ public class MediaStreamRepository : IMediaStreamRepository
@@ -383,7 +385,7 @@ index a25629132b..139d91d61e 100644
 +        var result = new Dictionary<Guid, IReadOnlyList<MediaStream>>(itemIds.Count);
 +        foreach (var group in context.MediaStreamInfos
 +                     .AsNoTracking()
-+                     .Where(e => itemIds.Contains(e.ItemId))
++                     .WhereOneOrMany(itemIds, e => e.ItemId)
 +                     .OrderBy(e => e.ItemId)
 +                     .ThenBy(e => e.StreamIndex)
 +                     .AsEnumerable()
@@ -567,7 +569,7 @@ index 0000000000..986c2139f1
 +    }
 +}
 diff --git a/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs b/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
-index be98f93dab..23091b8b33 100644
+index be98f93dab..cbad0c9fd9 100644
 --- a/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
 +++ b/Jellyfin.Server.Implementations/MediaSegments/MediaSegmentManager.cs
 @@ -9,6 +9,7 @@ using Jellyfin.Database.Implementations;
@@ -610,7 +612,7 @@ index be98f93dab..23091b8b33 100644
 +
 +        using var db = _dbProvider.CreateDbContext();
 +        return db.MediaSegments
-+            .Where(e => itemIds.Contains(e.ItemId))
++            .WhereOneOrMany(itemIds, e => e.ItemId)
 +            .Select(e => e.ItemId)
 +            .Distinct()
 +            .ToHashSet();

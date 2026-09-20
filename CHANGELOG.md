@@ -22,6 +22,13 @@ a trickplay query per media source, and a chapters query. Three new commits:
 - **Fetch a page's trickplay manifests with one query instead of one per media source.**
 - **Fetch a page's chapters with one query instead of one per item.**
 
+**Verified** on a copy of the live config: DTOs byte-identical to `12.1-p1` across 8 request
+shapes (series list, season, movie grid, NextUp, audio, single item, streams-only, trickplay-only);
+1,481 → 12 database commands and 910 → 235 ms on the full-series list; movie grid 560 → 240 ms.
+**Stated limit:** this library has no alternate-version links (all 95 `LinkedChildren` rows are
+collection links), so the batched alternate-version path returned empty on every compared request
+— it is exercised for correctness only when two versions of a film are merged.
+
 **Replaced assembly set grows 2 → 3:** `Jellyfin.Server.Implementations.dll` joins
 `Emby.Server.Implementations.dll` and `Jellyfin.Api.dll`. `MediaBrowser.Controller` — the
 assembly plugins bind against — is deliberately untouched: batch loaders sit on the concrete
