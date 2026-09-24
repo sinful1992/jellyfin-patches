@@ -64,9 +64,10 @@ def main():
             ms = float(m["ms"])
             by_route[route].append(ms)
             q = parse_qs(u.query)
-            fs = q.get("Fields") or q.get("fields")
+            # the Kotlin SDK repeats the param (fields=A&fields=B); the web client comma-joins
+            fs = {f for v in (q.get("Fields", []) + q.get("fields", [])) for f in v.split(",") if f}
             if fs:
-                fields[route][",".join(sorted(fs[0].split(",")))] += 1
+                fields[route][",".join(sorted(fs))] += 1
             if a.slow and ms >= a.slow:
                 slow.append((ms, m["ts"], m["status"], m["url"]))
 
