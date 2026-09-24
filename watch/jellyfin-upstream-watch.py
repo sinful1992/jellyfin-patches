@@ -159,10 +159,27 @@ def post(content):
     if not WEBHOOK:
         print("DISCORD_WEBHOOK_URL not set; would have posted:\n" + content, file=sys.stderr)
         return
-    body = json.dumps({"username": BOT, "content": content}).encode()
-    req = urllib.request.Request(
-        WEBHOOK, data=body, headers={"Content-Type": "application/json", "User-Agent": UA})
-    urllib.request.urlopen(req, timeout=30).read()
+    # Discord rejects content over 2000 chars with a 400, and state is already saved by
+    # then -- one oversized report (2026-09-20) was lost that way. Split on line breaks.
+    chunks, cur = [], ""
+    for line in content.split("\n"):
+        while len(line) > 1900:
+            chunks += [cur, line[:1900]]
+            cur, line = "", line[1900:]
+        if len(cur) + len(line) + 1 > 1900:
+            chunks.append(cur)
+            cur = ""
+        cur = f"{cur}\n{line}" if cur else line
+    chunks.append(cur)
+    for chunk in filter(None, chunks):
+        body = json.dumps({"username": BOT, "content": chunk}).encode()
+        req = urllib.request.Request(
+            WEBHOOK, data=body, headers={"Content-Type": "application/json", "User-Agent": UA})
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+        except Exception:
+            print("post failed; content was:\n" + content, file=sys.stderr)
+            raise
 
 
 def check_release(state, findings):
