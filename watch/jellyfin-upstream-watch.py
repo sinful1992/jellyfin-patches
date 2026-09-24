@@ -385,7 +385,7 @@ def check_base_image(state, findings):
             if state.get("last_base_rebuild") != "unlisted":
                 findings.append(
                     f"**LinuxServer's release feed lists no `{PINNED}ubu*` tag** (BASE_IMAGE pins "
-                    f"`{pinned_tag}`; {len(rels)} releases scanned) -- this check cannot see "
+                    f"`{pinned_tag}`; {len(tags)} versions listed) -- this check cannot see "
                     f"base rebuilds until it does. FYI, nothing to act on.")
             state["last_base_rebuild"] = "unlisted"
         elif mine[-1] != pinned_tag and _ls_num(mine[-1]) > _ls_num(pinned_tag):
