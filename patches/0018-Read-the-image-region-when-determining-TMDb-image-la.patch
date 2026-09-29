@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mateus Bandeira <mateus@bandeira.dev>
+Date: Sun, 20 Sep 2026 14:23:37 -0300
+Subject: [PATCH] Read the image region when determining TMDb image language in
+ `TmdbUtils`
+
+An image's region lives in TMDb's iso_3166_1 field, not in iso_639_1, which
+only ever holds the bare language. Reading just the language made every
+Portuguese image take on the requested region, so a pt-PT poster was reported
+as pt-BR and beat the genuine Brazilian ones on community rating. The region is
+now appended only when it contradicts the request, so images carrying TMDb's
+default region still match a plain language request.
+
+Fixes #16188
+
+(cherry picked from commit 9558dfc3b3fb1e16302246a4374fe171a075143c)
+---
+ .../Plugins/Tmdb/TmdbClientManager.cs         |  2 +-
+ .../Plugins/Tmdb/TmdbUtils.cs                 | 37 ++++++++++++-------
+ .../Tmdb/TmdbUtilsTests.cs                    | 25 +++++++++----
+ 3 files changed, 43 insertions(+), 21 deletions(-)
+
+diff --git a/MediaBrowser.Providers/Plugins/Tmdb/TmdbClientManager.cs b/MediaBrowser.Providers/Plugins/Tmdb/TmdbClientManager.cs
+index d75ebae988..8dd1a546fa 100644
+--- a/MediaBrowser.Providers/Plugins/Tmdb/TmdbClientManager.cs
++++ b/MediaBrowser.Providers/Plugins/Tmdb/TmdbClientManager.cs
+@@ -675,7 +675,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb
+                 var image = images[i];
+ 
+                 var imageType = type;
+-                var language = TmdbUtils.AdjustImageLanguage(image.Iso_639_1, requestLanguage);
++                var language = TmdbUtils.GetImageLanguage(image.Iso_639_1, image.Iso_3166_1, requestLanguage);
+ 
+                 // Return Backdrops with a language specified (it has text) as Thumb.
+                 if (imageType == ImageType.Backdrop && !string.IsNullOrEmpty(language))
+diff --git a/MediaBrowser.Providers/Plugins/Tmdb/TmdbUtils.cs b/MediaBrowser.Providers/Plugins/Tmdb/TmdbUtils.cs
+index f004251594..c8db90799d 100644
+--- a/MediaBrowser.Providers/Plugins/Tmdb/TmdbUtils.cs
++++ b/MediaBrowser.Providers/Plugins/Tmdb/TmdbUtils.cs
+@@ -464,30 +464,41 @@ namespace MediaBrowser.Providers.Plugins.Tmdb
+         }
+ 
+         /// <summary>
+-        /// Adjusts the image's language code preferring the 5 letter language code eg. en-US.
++        /// Determines the language code to report for an image.
+         /// </summary>
+-        /// <param name="imageLanguage">The image's actual language code.</param>
++        /// <remarks>
++        /// TMDb keeps an image's region in iso_3166_1, which is what separates a pt-PT poster from a pt-BR
++        /// one. The region is added to the returned code only when it differs from the requested one, as in
++        /// a pt-PT image for a pt-BR request. TMDb files nearly every image under a region, so adding it
++        /// unconditionally would return en-US for an image that has to keep matching a plain "en" request.
++        /// </remarks>
++        /// <param name="imageLanguage">The image's ISO 639-1 language code.</param>
++        /// <param name="imageRegion">The image's ISO 3166-1 country code.</param>
+         /// <param name="requestLanguage">The requested language code.</param>
+         /// <returns>The language code.</returns>
+-        public static string AdjustImageLanguage(string? imageLanguage, string requestLanguage)
++        public static string GetImageLanguage(string? imageLanguage, string? imageRegion, string? requestLanguage)
+         {
+-            if (string.IsNullOrEmpty(imageLanguage))
++            // TMDb now returns xx for no language instead of an empty string.
++            if (string.IsNullOrEmpty(imageLanguage) || string.Equals(imageLanguage, "xx", StringComparison.OrdinalIgnoreCase))
+             {
+                 return string.Empty;
+             }
+ 
+-            if (!string.IsNullOrEmpty(requestLanguage)
+-                && requestLanguage.Length > 2
+-                && imageLanguage.Length == 2
+-                && requestLanguage.StartsWith(imageLanguage, StringComparison.OrdinalIgnoreCase))
++            if (string.IsNullOrEmpty(requestLanguage))
+             {
+-                return requestLanguage;
++                return imageLanguage;
+             }
+ 
+-            // TMDb now returns xx for no language instead of an empty string.
+-            return string.Equals(imageLanguage, "xx", StringComparison.OrdinalIgnoreCase)
+-                ? string.Empty
+-                : imageLanguage;
++            var requestParts = requestLanguage.Split('-');
++
++            if (requestParts.Length != 2 || !string.Equals(requestParts[0], imageLanguage, StringComparison.OrdinalIgnoreCase))
++            {
++                return imageLanguage;
++            }
++
++            return string.IsNullOrEmpty(imageRegion) || string.Equals(imageRegion, requestParts[1], StringComparison.OrdinalIgnoreCase)
++                ? requestLanguage
++                : imageLanguage + "-" + imageRegion.ToUpperInvariant();
+         }
+ 
+         /// <summary>
+diff --git a/tests/Jellyfin.Providers.Tests/Tmdb/TmdbUtilsTests.cs b/tests/Jellyfin.Providers.Tests/Tmdb/TmdbUtilsTests.cs
+index 03bad3555e..8342621d97 100644
+--- a/tests/Jellyfin.Providers.Tests/Tmdb/TmdbUtilsTests.cs
++++ b/tests/Jellyfin.Providers.Tests/Tmdb/TmdbUtilsTests.cs
+@@ -30,14 +30,25 @@ namespace Jellyfin.Providers.Tests.Tmdb
+         }
+ 
+         [Theory]
+-        [InlineData("en", "en-US", "en-US")]
+-        [InlineData("fr-CA", "fr-BE", "fr-CA")]
+-        [InlineData("fr-CA", "fr", "fr-CA")]
+-        [InlineData("de", "en-US", "de")]
+-        [InlineData("", "en-US", "")]
+-        public static void AdjustImageLanguage_Valid_Success(string imageLanguage, string requestLanguage, string? expected)
++        // A regional request is only answered with a region when the image contradicts it.
++        [InlineData("pt", "BR", "pt-BR", "pt-BR")]
++        [InlineData("pt", "PT", "pt-BR", "pt-PT")]
++        [InlineData("en", "GB", "en-US", "en-GB")]
++        [InlineData("en", "US", "en-US", "en-US")]
++        [InlineData("en", null, "en-US", "en-US")]
++        // TMDb files nearly every image under a region, which must not stop a plain request matching.
++        [InlineData("en", "US", "en", "en")]
++        [InlineData("pt", "PT", "pt", "pt")]
++        // An image in another language keeps its bare code, so the English fallback still resolves.
++        [InlineData("en", "US", "pt-BR", "en")]
++        [InlineData("de", "DE", "en-US", "de")]
++        // TMDb returns xx rather than an empty string for an image with no text.
++        [InlineData("xx", "US", "en-US", "")]
++        [InlineData("", "US", "en-US", "")]
++        [InlineData(null, null, "en-US", "")]
++        public static void GetImageLanguage_Valid_Success(string? imageLanguage, string? imageRegion, string? requestLanguage, string expected)
+         {
+-            Assert.Equal(expected, TmdbUtils.AdjustImageLanguage(imageLanguage, requestLanguage));
++            Assert.Equal(expected, TmdbUtils.GetImageLanguage(imageLanguage, imageRegion, requestLanguage));
+         }
+ 
+         [Theory]

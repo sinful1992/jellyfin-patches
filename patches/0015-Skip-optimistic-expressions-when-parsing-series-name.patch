@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panko <prike18@gmail.com>
+Date: Mon, 7 Sep 2026 20:41:21 +0200
+Subject: [PATCH] Skip optimistic expressions when parsing series names
+
+Optimistic episode expressions (bare numbers) are only meant for episode
+parsing. When SeriesPathParser uses them, release folder names like
+Silo.S03.1080p.WEB-DL... get a false series name by reading 264 as S02E64.
+
+Signed-off-by: panko <prike18@gmail.com>
+(cherry picked from commit 58d2c94eb079864a05163de27cd7828d95fd1a5b)
+---
+ Emby.Naming/TV/SeriesPathParser.cs | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/Emby.Naming/TV/SeriesPathParser.cs b/Emby.Naming/TV/SeriesPathParser.cs
+index 94b4b5c823..1dd7a55aaf 100644
+--- a/Emby.Naming/TV/SeriesPathParser.cs
++++ b/Emby.Naming/TV/SeriesPathParser.cs
+@@ -20,6 +20,14 @@ namespace Emby.Naming.TV
+ 
+             foreach (var expression in options.EpisodeExpressions)
+             {
++                // Optimistic expressions (bare numbers, "01.blah", etc.) are only meant for
++                // episode parsing and produce false series names on release folder names like
++                // "Silo.S03.1080p.WEB-DL..." (e.g. reading "264" as S02E64). Skip them here.
++                if (expression.IsOptimistic)
++                {
++                    continue;
++                }
++
+                 var currentResult = Parse(path, expression);
+                 if (currentResult.Success)
+                 {
+@@ -49,8 +57,18 @@ namespace Emby.Naming.TV
+             {
+                 if (expression.IsNamed)
+                 {
++                    // Reject implausible season numbers (e.g. resolutions like 1280x720
++                    // read as S1280E720), mirroring EpisodePathParser.
++                    var seasonNumberGroup = match.Groups["seasonnumber"];
++                    if (seasonNumberGroup.Success
++                        && int.TryParse(seasonNumberGroup.ValueSpan, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var seasonNumber)
++                        && ((seasonNumber >= 200 && seasonNumber < 1928) || seasonNumber > 2500))
++                    {
++                        return result;
++                    }
++
+                     result.SeriesName = match.Groups["seriesname"].Value;
+-                    result.Success = !string.IsNullOrEmpty(result.SeriesName) && !match.Groups["seasonnumber"].ValueSpan.IsEmpty;
++                    result.Success = !string.IsNullOrEmpty(result.SeriesName) && !seasonNumberGroup.ValueSpan.IsEmpty;
+                 }
+             }
+ 

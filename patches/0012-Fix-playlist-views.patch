@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Wed, 16 Sep 2026 22:44:05 +0200
+Subject: [PATCH] Fix playlist views
+
+(cherry picked from commit 7d41bd29996fe4d7d3fba232d44495e2b3da5219)
+---
+ .../Library/UserViewManager.cs                | 50 +++++++++++--------
+ 1 file changed, 28 insertions(+), 22 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Library/UserViewManager.cs b/Emby.Server.Implementations/Library/UserViewManager.cs
+index cfb2dd53d3..6d52ce7440 100644
+--- a/Emby.Server.Implementations/Library/UserViewManager.cs
++++ b/Emby.Server.Implementations/Library/UserViewManager.cs
+@@ -60,10 +60,16 @@ namespace Emby.Server.Implementations.Library
+                 var folderViewType = collectionFolder?.CollectionType;
+ 
+                 // Playlist and BoxSet libraries require special handling because the folder only references linked items
+-                if ((folderViewType == CollectionType.playlists || folderViewType == CollectionType.boxsets)
+-                    && !HasVisibleChild(folder, user))
++                if (folderViewType == CollectionType.playlists || folderViewType == CollectionType.boxsets)
+                 {
+-                    continue;
++                    var itemKind = folderViewType == CollectionType.playlists
++                        ? BaseItemKind.Playlist
++                        : BaseItemKind.BoxSet;
++
++                    if (!HasVisibleItem(itemKind, folders, user))
++                    {
++                        continue;
++                    }
+                 }
+ 
+                 if (UserView.IsUserSpecific(folder))
+@@ -152,30 +158,30 @@ namespace Emby.Server.Implementations.Library
+                 .ToArray();
+         }
+ 
+-        private bool HasVisibleChild(Folder folder, User user)
++        private bool HasVisibleItem(BaseItemKind itemKind, IReadOnlyList<Folder> folders, User user)
+         {
+-            // Folder.Children answers this too, but a collection folder delegates it to its physical
+-            // folders, which resolve and then hold on to every child with every field.
+-            var parentIds = folder is CollectionFolder collectionFolder && collectionFolder.PhysicalFolderIds.Length > 0
+-                ? collectionFolder.PhysicalFolderIds
+-                : [folder.Id];
++            var topParentIds = folders.SelectMany(GetTopParentIds).ToArray();
++            if (topParentIds.Length == 0)
++            {
++                return false;
++            }
+ 
+-            foreach (var parentId in parentIds)
++            var items = _libraryManager.GetItemList(new InternalItemsQuery(user)
+             {
+-                var items = _libraryManager.GetItemList(new InternalItemsQuery(user)
+-                {
+-                    ParentId = parentId,
+-                    GroupByPresentationUniqueKey = false,
+-                    DtoOptions = DtoOptions.StoredColumnsOnly
+-                });
++                IncludeItemTypes = [itemKind],
++                TopParentIds = topParentIds,
++                GroupByPresentationUniqueKey = false,
++                DtoOptions = DtoOptions.StoredColumnsOnly
++            });
+ 
+-                if (items.Any(item => item.IsVisible(user)))
+-                {
+-                    return true;
+-                }
+-            }
++            return items.Any(item => item.IsVisible(user));
++        }
+ 
+-            return false;
++        private static IEnumerable<Guid> GetTopParentIds(Folder folder)
++        {
++            return folder is CollectionFolder collectionFolder && collectionFolder.PhysicalFolderIds.Length > 0
++                ? collectionFolder.PhysicalFolderIds
++                : [folder.Id];
+         }
+ 
+         public UserView GetUserSubViewWithName(string name, Guid parentId, CollectionType? type, string sortName)

@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panko <prike18@gmail.com>
+Date: Tue, 15 Sep 2026 14:05:33 +0200
+Subject: [PATCH] Trim release tests into existing suites and cover NNNNxNNNN
+
+Signed-off-by: panko <prike18@gmail.com>
+(cherry picked from commit f02164771d4ce18fa93e4c30c69c264ecbae76ae)
+---
+ .../TV/ReleaseNameParsingTests.cs             | 37 -------------------
+ .../TV/SeriesPathParserTest.cs                | 10 +++++
+ .../TV/SeriesResolverTests.cs                 |  2 +
+ 3 files changed, 12 insertions(+), 37 deletions(-)
+ delete mode 100644 tests/Jellyfin.Naming.Tests/TV/ReleaseNameParsingTests.cs
+
+diff --git a/tests/Jellyfin.Naming.Tests/TV/ReleaseNameParsingTests.cs b/tests/Jellyfin.Naming.Tests/TV/ReleaseNameParsingTests.cs
+deleted file mode 100644
+index 453f19ed52..0000000000
+--- a/tests/Jellyfin.Naming.Tests/TV/ReleaseNameParsingTests.cs
++++ /dev/null
+@@ -1,37 +0,0 @@
+-using Emby.Naming.Common;
+-using Emby.Naming.TV;
+-using Xunit;
+-
+-namespace Jellyfin.Naming.Tests.TV
+-{
+-    /// <summary>
+-    /// Regression tests for series name extraction from release folder names.
+-    /// All titles, groups and person names below are fictional.
+-    /// </summary>
+-    public class ReleaseNameParsingTests
+-    {
+-        private static readonly NamingOptions _namingOptions = new();
+-
+-        [Theory]
+-        // Optimistic episode expressions must not produce series names.
+-        [InlineData("Bunker.S03.1080p.PULSAR.WEB-DL.DDP5.1.Atmos.H.264-showWEB", "Bunker")]
+-        [InlineData("Outer.Colony.S01.1080p.NOVA.WEB-DL.DDP5.1.H.264.HUN.ENG-QUASAR", "Outer Colony")]
+-        public void SeriesResolver_ExtractsNameFromReleaseFolder(string folderName, string expectedName)
+-        {
+-            var result = SeriesResolver.Resolve(_namingOptions, "/media/" + folderName);
+-
+-            Assert.Equal(expectedName, result.Name);
+-        }
+-
+-        [Theory]
+-        // Resolution patterns (1280x720 etc.) must not parse as season/episode.
+-        [InlineData("/media/Jujutsu Kaisen (BD_1280x720)")]
+-        [InlineData("/media/Show.1920x1080.BluRay")]
+-        public void SeriesPathParser_ResolutionPatternIsNotASeries(string path)
+-        {
+-            var result = SeriesPathParser.Parse(_namingOptions, path);
+-
+-            Assert.False(result.Success);
+-        }
+-    }
+-}
+diff --git a/tests/Jellyfin.Naming.Tests/TV/SeriesPathParserTest.cs b/tests/Jellyfin.Naming.Tests/TV/SeriesPathParserTest.cs
+index e6b0409db7..4e1de22790 100644
+--- a/tests/Jellyfin.Naming.Tests/TV/SeriesPathParserTest.cs
++++ b/tests/Jellyfin.Naming.Tests/TV/SeriesPathParserTest.cs
+@@ -25,5 +25,15 @@ namespace Jellyfin.Naming.Tests.TV
+             Assert.Equal(name, res.SeriesName);
+             Assert.True(res.Success);
+         }
++
++        [Theory]
++        [InlineData("/media/Jujutsu Kaisen (BD_1280x720)")]
++        [InlineData("/media/Show.1920x1080.BluRay")]
++        public void SeriesPathParser_ResolutionPatternIsNotASeries(string path)
++        {
++            var res = SeriesPathParser.Parse(_namingOptions, path);
++
++            Assert.False(res.Success);
++        }
+     }
+ }
+diff --git a/tests/Jellyfin.Naming.Tests/TV/SeriesResolverTests.cs b/tests/Jellyfin.Naming.Tests/TV/SeriesResolverTests.cs
+index 023c6cb2fa..0c44595441 100644
+--- a/tests/Jellyfin.Naming.Tests/TV/SeriesResolverTests.cs
++++ b/tests/Jellyfin.Naming.Tests/TV/SeriesResolverTests.cs
+@@ -25,6 +25,8 @@ namespace Jellyfin.Naming.Tests.TV
+         [InlineData("Marvel's.Agents.of.S.H.I.E.L.D.", "Marvel's Agents of S.H.I.E.L.D.")]
+         [InlineData("The.Show.S.H.O.W", "The Show S.H.O.W")]
+         [InlineData("/some/path/Dawson's Creek", "Dawson's Creek")]
++        [InlineData("/media/Bunker.S03.1080p.PULSAR.WEB-DL.DDP5.1.Atmos.H.264-showWEB", "Bunker")]
++        [InlineData("/media/Outer.Colony.S01.1080p.NOVA.WEB-DL.DDP5.1.H.264.HUN.ENG-QUASAR", "Outer Colony")]
+         public void SeriesResolverResolveTest(string path, string name)
+         {
+             var res = SeriesResolver.Resolve(_namingOptions, path);

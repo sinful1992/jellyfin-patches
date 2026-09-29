@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Fri, 25 Sep 2026 19:40:31 +0200
+Subject: [PATCH] Set provider id in TmdbEpisodeProvider
+
+(cherry picked from commit c2284022ef0fd35144e4077445e44c7ea62497d4)
+---
+ .../Plugins/Tmdb/TV/TmdbEpisodeProvider.cs                  | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbEpisodeProvider.cs b/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbEpisodeProvider.cs
+index 8172ab14df..83630bb20f 100644
+--- a/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbEpisodeProvider.cs
++++ b/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbEpisodeProvider.cs
+@@ -124,6 +124,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                     // Forces a deep copy of the first TvEpisode, so we don't modify the original because it's cached
+                     episodeResult = new TvEpisode()
+                     {
++                        Id = result[0].Id,
+                         Name = result[0].Name,
+                         Overview = result[0].Overview,
+                         AirDate = result[0].AirDate,
+@@ -188,6 +189,11 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                 CommunityRating = Convert.ToSingle(episodeResult.VoteAverage)
+             };
+ 
++            if (episodeResult.Id is int episodeTmdbId and > 0)
++            {
++                item.SetProviderId(MetadataProvider.Tmdb, episodeTmdbId.ToString(CultureInfo.InvariantCulture));
++            }
++
+             var externalIds = episodeResult.ExternalIds;
+             item.TrySetProviderId(MetadataProvider.Tvdb, externalIds?.TvdbId);
+             item.TrySetProviderId(MetadataProvider.Imdb, externalIds?.ImdbId);

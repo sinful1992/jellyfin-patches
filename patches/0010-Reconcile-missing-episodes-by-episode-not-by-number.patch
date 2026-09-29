@@ -1,0 +1,314 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Wed, 16 Sep 2026 09:40:42 +0200
+Subject: [PATCH] Reconcile missing episodes by episode, not by number
+
+(cherry picked from commit f50ab19970d719155f21622f1d1b6efd6eb6c562)
+---
+ .../Tmdb/TV/TmdbMissingEpisodeProvider.cs     |  30 ++++-
+ .../TV/SeriesMetadataService.cs               |  72 ++++++++++--
+ .../TV/SeriesMetadataServiceTests.cs          | 107 ++++++++++++++++++
+ 3 files changed, 196 insertions(+), 13 deletions(-)
+ create mode 100644 tests/Jellyfin.Providers.Tests/TV/SeriesMetadataServiceTests.cs
+
+diff --git a/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbMissingEpisodeProvider.cs b/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbMissingEpisodeProvider.cs
+index b44361e4e7..7646c08329 100644
+--- a/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbMissingEpisodeProvider.cs
++++ b/MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbMissingEpisodeProvider.cs
+@@ -118,7 +118,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+             // create a duplicate.
+             // When missing episodes are disabled, this pass also prunes virtual episodes that aired more
+             // than the grace period ago, as well as any specials when specials are not wanted.
+-            var (existingEpisodes, updatableEpisodes) = GetExistingEpisodes(item, !importMissing, today, gracePeriodDays, importSpecials, out var prunedEpisodes);
++            var (existingEpisodes, updatableEpisodes, physicalTmdbIds) = GetExistingEpisodes(item, !importMissing, today, gracePeriodDays, importSpecials, out var prunedEpisodes);
+ 
+             var seasonsByNumber = item.GetRecursiveChildren(i => i is Season)
+                 .OfType<Season>()
+@@ -197,6 +197,13 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                         continue;
+                     }
+ 
++                    // The slot is free, but the episode itself may not be: when the files follow a different
++                    // order, the same episode sits at another number and creating this one would duplicate it.
++                    if (physicalTmdbIds.Contains(tmdbEpisode.Id.ToString(CultureInfo.InvariantCulture)))
++                    {
++                        continue;
++                    }
++
+                     var targetSeason = await GetOrCreateSeasonAsync(item, seasonNumber, tmdbSeason.Name, seasonsByNumber, cancellationToken).ConfigureAwait(false);
+                     var newEpisode = AddVirtualEpisode(item, targetSeason, tmdbEpisode, premiereDate);
+                     await EnsureEpisodeImageAsync(newEpisode, tmdbEpisode, cancellationToken).ConfigureAwait(false);
+@@ -364,11 +371,12 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                 enabledLibraries.Contains(folder.Id.ToString("N", CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase));
+         }
+ 
+-        private (HashSet<(int Season, int Episode)> Keys, Dictionary<(int Season, int Episode), Episode> Updatable) GetExistingEpisodes(Series series, bool pruneAgedOut, DateTime today, int gracePeriodDays, bool importSpecials, out bool pruned)
++        private (HashSet<(int Season, int Episode)> Keys, Dictionary<(int Season, int Episode), Episode> Updatable, HashSet<string> PhysicalTmdbIds) GetExistingEpisodes(Series series, bool pruneAgedOut, DateTime today, int gracePeriodDays, bool importSpecials, out bool pruned)
+         {
+             var keys = new HashSet<(int Season, int Episode)>();
+             var updatable = new Dictionary<(int Season, int Episode), Episode>();
+             var physicalKeys = new HashSet<(int Season, int Episode)>();
++            var physicalTmdbIds = new HashSet<string>(StringComparer.Ordinal);
+             var ourVirtuals = new List<((int Season, int Episode) Key, Episode Episode)>();
+             pruned = false;
+ 
+@@ -403,6 +411,17 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                     continue;
+                 }
+ 
++                if (!episode.IsVirtualItem)
++                {
++                    // Which episode a file holds is what TMDb's episode id says, not the number the file is
++                    // stored under: aired, DVD and absolute orders number the same episodes differently.
++                    var physicalTmdbId = episode.GetProviderId(MetadataProvider.Tmdb);
++                    if (!string.IsNullOrEmpty(physicalTmdbId))
++                    {
++                        physicalTmdbIds.Add(physicalTmdbId);
++                    }
++                }
++
+                 if (episode.ParentIndexNumber.HasValue && episode.IndexNumber.HasValue)
+                 {
+                     var key = (episode.ParentIndexNumber.Value, episode.IndexNumber.Value);
+@@ -432,6 +451,11 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                     DeleteEpisode(episode, "a physical episode now exists for this slot");
+                     pruned = true;
+                 }
++                else if (physicalTmdbIds.Contains(episode.GetProviderId(MetadataProvider.Tmdb)!))
++                {
++                    DeleteEpisode(episode, "the same episode is already present under another number");
++                    pruned = true;
++                }
+                 else
+                 {
+                     // Virtual episodes this provider created are candidates for metadata sync.
+@@ -439,7 +463,7 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
+                 }
+             }
+ 
+-            return (keys, updatable);
++            return (keys, updatable, physicalTmdbIds);
+         }
+ 
+         /// <summary>
+diff --git a/MediaBrowser.Providers/TV/SeriesMetadataService.cs b/MediaBrowser.Providers/TV/SeriesMetadataService.cs
+index f89f688de1..d64529f7e7 100644
+--- a/MediaBrowser.Providers/TV/SeriesMetadataService.cs
++++ b/MediaBrowser.Providers/TV/SeriesMetadataService.cs
+@@ -207,14 +207,57 @@ public class SeriesMetadataService : MetadataService<Series, SeriesInfo>
+         }
+     }
+ 
++    internal static HashSet<string> GetPresentEpisodeIds(IEnumerable<Episode> episodes)
++    {
++        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
++        foreach (var episode in episodes)
++        {
++            if (episode.IsVirtualItem || episode.IsMissingEpisode)
++            {
++                continue;
++            }
++
++            foreach (var (provider, id) in episode.ProviderIds)
++            {
++                if (string.IsNullOrWhiteSpace(id))
++                {
++                    continue;
++                }
++
++                var key = IdentityKey(provider, id);
++                counts[key] = counts.GetValueOrDefault(key) + 1;
++            }
++        }
++
++        return [.. counts.Where(e => e.Value == 1).Select(e => e.Key)];
++    }
++
++    internal static bool IsAlreadyPresent(Episode episode, HashSet<string> presentEpisodeIds)
++    {
++        foreach (var (provider, id) in episode.ProviderIds)
++        {
++            if (!string.IsNullOrWhiteSpace(id) && presentEpisodeIds.Contains(IdentityKey(provider, id)))
++            {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
++    private static string IdentityKey(string provider, string id) => provider + "=" + id;
++
+     private void RemoveObsoleteEpisodes(Series series)
+     {
+-        var episodesBySeason = series.GetEpisodes(null, new DtoOptions(), true)
++        var episodes = series.GetEpisodes(null, new DtoOptions(), true)
+                         .OfType<Episode>()
+-                        .GroupBy(e => e.ParentIndexNumber)
+                         .ToList();
+ 
+-        foreach (var seasonEpisodes in episodesBySeason)
++        // Matched across the whole series, not per season: the orders disagree about which season an episode
++        // belongs to as readily as they disagree about its number.
++        var presentEpisodeIds = GetPresentEpisodeIds(episodes);
++
++        foreach (var seasonEpisodes in episodes.GroupBy(e => e.ParentIndexNumber))
+         {
+             List<Episode> nonPhysicalEpisodes = [];
+             List<Episode> physicalEpisodes = [];
+@@ -233,26 +276,35 @@ public class SeriesMetadataService : MetadataService<Series, SeriesInfo>
+             foreach (var episode in nonPhysicalEpisodes)
+             {
+                 // Episodes without an episode number are practically orphaned and should be deleted
+-                // Episodes with a physical equivalent should be deleted (they are no longer missing)
+-                var shouldKeep = episode.IndexNumber.HasValue && !physicalEpisodes.Any(e => e.ContainsEpisodeNumber(episode.IndexNumber.Value));
++                if (!episode.IndexNumber.HasValue)
++                {
++                    DeleteEpisode(episode, "it has no episode number");
++                    continue;
++                }
+ 
+-                if (shouldKeep)
++                // Episodes with a physical equivalent should be deleted (they are no longer missing)
++                if (physicalEpisodes.Any(e => e.ContainsEpisodeNumber(episode.IndexNumber.Value)))
+                 {
++                    DeleteEpisode(episode, "a physical episode has that number");
+                     continue;
+                 }
+ 
+-                DeleteEpisode(episode);
++                if (IsAlreadyPresent(episode, presentEpisodeIds))
++                {
++                    DeleteEpisode(episode, "the same episode is already present under another number");
++                }
+             }
+         }
+     }
+ 
+-    private void DeleteEpisode(Episode episode)
++    private void DeleteEpisode(Episode episode, string reason)
+     {
+         Logger.LogInformation(
+-            "Removing virtual episode S{SeasonNumber}E{EpisodeNumber} in series {SeriesName}",
++            "Removing virtual episode S{SeasonNumber}E{EpisodeNumber} in series {SeriesName}: {Reason}",
+             episode.ParentIndexNumber,
+             episode.IndexNumber,
+-            episode.SeriesName);
++            episode.SeriesName,
++            reason);
+ 
+         LibraryManager.DeleteItem(
+             episode,
+diff --git a/tests/Jellyfin.Providers.Tests/TV/SeriesMetadataServiceTests.cs b/tests/Jellyfin.Providers.Tests/TV/SeriesMetadataServiceTests.cs
+new file mode 100644
+index 0000000000..3f6a7fb0b0
+--- /dev/null
++++ b/tests/Jellyfin.Providers.Tests/TV/SeriesMetadataServiceTests.cs
+@@ -0,0 +1,107 @@
++using System.Collections.Generic;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.TV;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.IO;
++using MediaBrowser.Providers.TV;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Providers.Tests.TV;
++
++/// <summary>
++/// Covers reconciling missing episodes against the episodes the user has, which cannot be done on episode
++/// numbers alone: aired, DVD and absolute orders number the same episodes differently, so the tail of the
++/// longer order is the episodes the user owns rather than the ones they lack.
++/// </summary>
++public class SeriesMetadataServiceTests
++{
++    public SeriesMetadataServiceTests()
++    {
++        // An episode with a path asks the file system what kind of location it is. Only set when nothing else
++        // in the assembly has, since it is process-wide.
++        BaseItem.FileSystem ??= Mock.Of<IFileSystem>();
++    }
++
++    [Fact]
++    public void IsAlreadyPresent_VirtualEpisodeCarriesTheIdOfAPresentOne_ReturnsTrue()
++    {
++        // The Six Million Dollar Man S3: 21 files numbered in DVD order, 23 episodes in aired order, so
++        // aired 22 and 23 are the files stored as 20 and 21.
++        var present = SeriesMetadataService.GetPresentEpisodeIds(
++        [
++            Physical(20, (MetadataProvider.Tvdb, "236715")),
++            Physical(21, (MetadataProvider.Tvdb, "236716"))
++        ]);
++
++        Assert.True(SeriesMetadataService.IsAlreadyPresent(Virtual(22, (MetadataProvider.Tvdb, "236715")), present));
++        Assert.True(SeriesMetadataService.IsAlreadyPresent(Virtual(23, (MetadataProvider.Tvdb, "236716")), present));
++    }
++
++    [Fact]
++    public void IsAlreadyPresent_GenuinelyMissingEpisode_ReturnsFalse()
++    {
++        // The aired-only two-parter the user really does not have keeps its missing episodes.
++        var present = SeriesMetadataService.GetPresentEpisodeIds(
++        [
++            Physical(20, (MetadataProvider.Tvdb, "236715")),
++            Physical(21, (MetadataProvider.Tvdb, "236716"))
++        ]);
++
++        Assert.False(SeriesMetadataService.IsAlreadyPresent(Virtual(15, (MetadataProvider.Tvdb, "4273533")), present));
++    }
++
++    [Fact]
++    public void GetPresentEpisodeIds_IdSharedBySeveralEpisodes_IsNotAnIdentity()
++    {
++        // A series' own IMDb id lands on every episode, and TMDb reports an unknown TVRage id as 0. Taking
++        // either for an episode identity would let one file delete every missing episode of the series.
++        var present = SeriesMetadataService.GetPresentEpisodeIds(
++        [
++            Physical(1, (MetadataProvider.Imdb, "tt0836592"), (MetadataProvider.TvRage, "0"), (MetadataProvider.Tvdb, "1001")),
++            Physical(2, (MetadataProvider.Imdb, "tt0836592"), (MetadataProvider.TvRage, "0"), (MetadataProvider.Tvdb, "1002"))
++        ]);
++
++        Assert.False(SeriesMetadataService.IsAlreadyPresent(Virtual(3, (MetadataProvider.Imdb, "tt0836592")), present));
++        Assert.False(SeriesMetadataService.IsAlreadyPresent(Virtual(4, (MetadataProvider.TvRage, "0")), present));
++        Assert.True(SeriesMetadataService.IsAlreadyPresent(Virtual(5, (MetadataProvider.Tvdb, "1001")), present));
++    }
++
++    [Fact]
++    public void GetPresentEpisodeIds_VirtualEpisode_DoesNotCountAsPresent()
++    {
++        // Two virtual episodes for the same episode must not cancel each other out into "present".
++        var present = SeriesMetadataService.GetPresentEpisodeIds(
++        [
++            Virtual(22, (MetadataProvider.Tvdb, "236715"))
++        ]);
++
++        Assert.Empty(present);
++    }
++
++    [Fact]
++    public void GetPresentEpisodeIds_BlankStoredId_IsIgnored()
++    {
++        // SetProviderId refuses these, but a row written by an older version can still hold one.
++        var episode = Physical(1);
++        episode.ProviderIds["Tvdb"] = " ";
++
++        Assert.Empty(SeriesMetadataService.GetPresentEpisodeIds([episode]));
++    }
++
++    private static Episode Physical(int indexNumber, params (MetadataProvider Provider, string Id)[] providerIds)
++        => WithIds(new Episode { IndexNumber = indexNumber, Path = $"/media/show/Season 03/E{indexNumber}.mkv" }, providerIds);
++
++    private static Episode Virtual(int indexNumber, params (MetadataProvider Provider, string Id)[] providerIds)
++        => WithIds(new Episode { IndexNumber = indexNumber, IsVirtualItem = true }, providerIds);
++
++    private static Episode WithIds(Episode episode, IEnumerable<(MetadataProvider Provider, string Id)> providerIds)
++    {
++        foreach (var (provider, id) in providerIds)
++        {
++            episode.SetProviderId(provider, id);
++        }
++
++        return episode;
++    }
++}

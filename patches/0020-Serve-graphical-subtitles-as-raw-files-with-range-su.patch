@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Tue, 22 Sep 2026 17:17:58 +0200
+Subject: [PATCH] Serve graphical subtitles as raw files with range support
+
+(cherry picked from commit 5bc55af0272e51b4fbc8cf84ba9a4cd68ec7f35f)
+---
+ .../Controllers/SubtitleController.cs         |  61 ++++++--
+ .../Controllers/SubtitleControllerTests.cs    | 137 ++++++++++++++++++
+ 2 files changed, 187 insertions(+), 11 deletions(-)
+ create mode 100644 tests/Jellyfin.Api.Tests/Controllers/SubtitleControllerTests.cs
+
+diff --git a/Jellyfin.Api/Controllers/SubtitleController.cs b/Jellyfin.Api/Controllers/SubtitleController.cs
+index 0f97187f04..05889795b9 100644
+--- a/Jellyfin.Api/Controllers/SubtitleController.cs
++++ b/Jellyfin.Api/Controllers/SubtitleController.cs
+@@ -235,18 +235,17 @@ public class SubtitleController : BaseJellyfinApiController
+             format = "json";
+         }
+ 
+-        if (string.IsNullOrEmpty(format))
++        // Graphical subtitles cannot be parsed or rewritten, so they are always delivered as the raw
++        // stream for the client to render. Serve them straight from disk instead of piping them
++        // through the encoder, so that range requests keep working: clients fetch these tracks
++        // incrementally while rendering them, and they are far too large to hand over in one piece.
++        if (MediaStream.IsPgsFormat(format) || MediaStream.IsVobSubFormat(format))
+         {
+-            var item = _libraryManager.GetItemById<Video>(itemId.Value);
+-
+-            var idString = itemId.Value.ToString("N", CultureInfo.InvariantCulture);
+-            var mediaSource = _mediaSourceManager.GetStaticMediaSources(item, false)
+-                .First(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.Ordinal));
+-
+-            var subtitleStream = mediaSource.MediaStreams
+-                .First(i => i.Type == MediaStreamType.Subtitle && i.Index == index);
+-
+-            return PhysicalFile(subtitleStream.Path, MimeTypes.GetMimeType(subtitleStream.Path));
++            var subtitlePath = await GetGraphicalSubtitlePath(itemId.Value, mediaSourceId, index.Value).ConfigureAwait(false);
++            if (!string.IsNullOrEmpty(subtitlePath))
++            {
++                return PhysicalFile(subtitlePath, MimeTypes.GetMimeType(subtitlePath), true);
++            }
+         }
+ 
+         if (string.Equals(format, "vtt", StringComparison.OrdinalIgnoreCase) && addVttTimeMap)
+@@ -459,6 +458,46 @@ public class SubtitleController : BaseJellyfinApiController
+         }
+     }
+ 
++    private async Task<string?> GetGraphicalSubtitlePath(Guid id, string? mediaSourceId, int index)
++    {
++        var item = _libraryManager.GetItemById<BaseItem>(id);
++        if (item is null)
++        {
++            return null;
++        }
++
++        var idString = id.ToString("N", CultureInfo.InvariantCulture);
++        var mediaSource = _mediaSourceManager.GetStaticMediaSources(item, false)
++            .FirstOrDefault(i => string.Equals(i.Id, mediaSourceId ?? idString, StringComparison.OrdinalIgnoreCase));
++
++        var subtitleStream = mediaSource?.MediaStreams
++            .FirstOrDefault(i => i.Type == MediaStreamType.Subtitle && i.Index == index);
++
++        if (mediaSource is null || subtitleStream is null
++            || !(subtitleStream.IsPgsSubtitleStream || subtitleStream.IsVobSubSubtitleStream))
++        {
++            return null;
++        }
++
++        var path = await _subtitleEncoder.GetSubtitleFilePath(subtitleStream, mediaSource, CancellationToken.None).ConfigureAwait(false);
++        if (string.IsNullOrEmpty(path))
++        {
++            return null;
++        }
++
++        // Only a raw PGS payload or an extracted .mks can be handed over untouched. Anything else the
++        // encoder resolved to (e.g. a VobSub .idx/.sub pair, which it converts) is not a passthrough.
++        var extension = Path.GetExtension(path.AsSpan()).TrimStart('.').ToString();
++        if (!MediaStream.IsPgsFormat(extension)
++            && !string.Equals(extension, "mks", StringComparison.OrdinalIgnoreCase))
++        {
++            return null;
++        }
++
++        // Remotely hosted external subtitles have no local file to serve; those fall back to the encoder.
++        return _fileSystem.FileExists(path) ? path : null;
++    }
++
+     /// <summary>
+     /// Encodes a subtitle in the specified format.
+     /// </summary>
+diff --git a/tests/Jellyfin.Api.Tests/Controllers/SubtitleControllerTests.cs b/tests/Jellyfin.Api.Tests/Controllers/SubtitleControllerTests.cs
+new file mode 100644
+index 0000000000..77321f0b05
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Controllers/SubtitleControllerTests.cs
+@@ -0,0 +1,137 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Threading;
++using System.Threading.Tasks;
++using Jellyfin.Api.Controllers;
++using MediaBrowser.Controller.Configuration;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.Movies;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Controller.Providers;
++using MediaBrowser.Controller.Subtitles;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.IO;
++using Microsoft.AspNetCore.Mvc;
++using Microsoft.Extensions.Logging.Abstractions;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Controllers;
++
++public class SubtitleControllerTests
++{
++    private const int SubtitleIndex = 2;
++
++    private static readonly Guid _itemId = new("6e1f0a3b7c8d4e5f9a0b1c2d3e4f5a6b");
++
++    [Theory]
++    // Graphical subtitle tracks are negotiated as SubtitleDeliveryMethod.External and must be handed
++    // to the client untouched, because neither format can be parsed or rewritten.
++    [InlineData("pgssub", "pgssub", "/cache/subs/sub.sup")]
++    // FFmpeg cannot mux VobSub back into an .idx/.sub pair, so extracted VobSub is exposed as .mks
++    // while the negotiated profile format stays "vobsub".
++    [InlineData("vobsub", "dvdsub", "/cache/subs/sub.mks")]
++    public async Task GetSubtitle_GraphicalStream_ReturnsRawFileWithRangeProcessing(string format, string codec, string path)
++    {
++        var encoder = new Mock<ISubtitleEncoder>(MockBehavior.Strict);
++        var controller = CreateController(codec, path, encoder, out var fileSystem);
++        fileSystem.Setup(f => f.FileExists(path)).Returns(true);
++
++        var result = await controller.GetSubtitle(_itemId, _itemId.ToString("N"), SubtitleIndex, format, null, null, null, null, null);
++
++        var fileResult = Assert.IsType<PhysicalFileResult>(result);
++        Assert.Equal(path, fileResult.FileName);
++        Assert.True(fileResult.EnableRangeProcessing);
++        encoder.Verify(
++            e => e.GetSubtitles(It.IsAny<BaseItem>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<long>(), It.IsAny<long>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()),
++            Times.Never);
++    }
++
++    [Fact]
++    public async Task GetSubtitle_RemotelyHostedGraphicalStream_FallsBackToEncoder()
++    {
++        var encoder = new Mock<ISubtitleEncoder>(MockBehavior.Strict);
++        var controller = CreateController("pgssub", "https://example.com/sub.sup", encoder, out var fileSystem);
++        fileSystem.Setup(f => f.FileExists(It.IsAny<string>())).Returns(false);
++        encoder.Setup(e => e.GetSubtitles(It.IsAny<BaseItem>(), It.IsAny<string>(), SubtitleIndex, "pgssub", 0, 0, false, It.IsAny<CancellationToken>()))
++            .ReturnsAsync(new MemoryStream([1, 2, 3]));
++
++        var result = await controller.GetSubtitle(_itemId, _itemId.ToString("N"), SubtitleIndex, "pgssub", null, null, null, null, null);
++
++        Assert.IsType<FileStreamResult>(result);
++    }
++
++    [Fact]
++    public async Task GetSubtitle_VobSubIdxPair_FallsBackToEncoder()
++    {
++        // A .idx/.sub pair has no raw payload the client could render: the encoder converts it.
++        var encoder = new Mock<ISubtitleEncoder>(MockBehavior.Strict);
++        var controller = CreateController("dvdsub", "/media/sub.idx", encoder, out _);
++        encoder.Setup(e => e.GetSubtitles(It.IsAny<BaseItem>(), It.IsAny<string>(), SubtitleIndex, "vobsub", 0, 0, false, It.IsAny<CancellationToken>()))
++            .ReturnsAsync(new MemoryStream([1, 2, 3]));
++
++        var result = await controller.GetSubtitle(_itemId, _itemId.ToString("N"), SubtitleIndex, "vobsub", null, null, null, null, null);
++
++        Assert.IsType<FileStreamResult>(result);
++    }
++
++    [Fact]
++    public async Task GetSubtitle_TextStream_IsEncoded()
++    {
++        var encoder = new Mock<ISubtitleEncoder>(MockBehavior.Strict);
++        var controller = CreateController("subrip", "/media/sub.srt", encoder, out _);
++        encoder.Setup(e => e.GetSubtitles(It.IsAny<BaseItem>(), It.IsAny<string>(), SubtitleIndex, "vtt", 0, 0, false, It.IsAny<CancellationToken>()))
++            .ReturnsAsync(new MemoryStream([1, 2, 3]));
++
++        var result = await controller.GetSubtitle(_itemId, _itemId.ToString("N"), SubtitleIndex, "vtt", null, null, null, null, null);
++
++        Assert.IsType<FileStreamResult>(result);
++    }
++
++    private static SubtitleController CreateController(
++        string codec,
++        string subtitlePath,
++        Mock<ISubtitleEncoder> subtitleEncoder,
++        out Mock<IFileSystem> fileSystem)
++    {
++        var item = new Movie { Id = _itemId };
++        var subtitleStream = new MediaStream
++        {
++            Type = MediaStreamType.Subtitle,
++            Index = SubtitleIndex,
++            Codec = codec,
++            Path = subtitlePath,
++            IsExternal = true
++        };
++
++        var mediaSource = new MediaSourceInfo
++        {
++            Id = _itemId.ToString("N"),
++            MediaStreams = new List<MediaStream> { subtitleStream }
++        };
++
++        var libraryManager = new Mock<ILibraryManager>();
++        libraryManager.Setup(l => l.GetItemById<BaseItem>(_itemId)).Returns(item);
++
++        var mediaSourceManager = new Mock<IMediaSourceManager>();
++        mediaSourceManager.Setup(m => m.GetStaticMediaSources(item, false, null)).Returns([mediaSource]);
++
++        subtitleEncoder.Setup(e => e.GetSubtitleFilePath(subtitleStream, mediaSource, It.IsAny<CancellationToken>()))
++            .ReturnsAsync(subtitlePath);
++
++        fileSystem = new Mock<IFileSystem>();
++
++        return new SubtitleController(
++            Mock.Of<IServerConfigurationManager>(),
++            libraryManager.Object,
++            Mock.Of<ISubtitleManager>(),
++            subtitleEncoder.Object,
++            mediaSourceManager.Object,
++            Mock.Of<IProviderManager>(),
++            fileSystem.Object,
++            NullLogger<SubtitleController>.Instance);
++    }
++}

@@ -3,6 +3,22 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p3 — notes
+
+**Upstream backports, not our own work:** 13 commits cherry-picked with `-x` from `release-12.z`
+after v12.1, so `port-check` DROPs them at the 12.1.1 bump. Taken: #17964 Sample folders as extras,
+#18090 missing episodes reconciled by episode identity, #18096 OMDb HTML entities, #18104 playlist
+views, #18139 NFO extra names kept, #18061 series-name parsing from release folders, #18150 TMDb
+image language by region, #18164 `codec_tag_string` probe typo, #18168 PGS/VobSub served raw with
+range support (inside the already-ticketed `Stream.{format}` action — no new routes).
+**Skipped, with reasons:** music (#18005 #18192 #18095 #18148 — Jellyfin has no music library,
+music is Navidrome), #18195 (progressive transcodes only; every progressive stream here is
+`static=true`), #18196 (post-scan ANALYZE for fresh-install skew; would add two DB assemblies),
+migrations that already ran (#18059 #18073), ratings (#18057 #18134 — re-runs a ratings migration,
+no GB change), #18161 (trickplay off), #18138, #18132, #18107 (chapter images off).
+New replaced assemblies: `Emby.Naming`, `MediaBrowser.Providers`, `MediaBrowser.MediaEncoding`.
+One public signature removed (`TmdbUtils.AdjustImageLanguage`) — no caller outside Providers.
+
 ## 12.1-p2 — 2026-09-20
 
 Base `v12.1` · image `jellyfin-patched:12.1-p2`

@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: panko <prike18@gmail.com>
+Date: Tue, 15 Sep 2026 14:11:27 +0200
+Subject: [PATCH] Use Samples extra rule for Sample folders and expand tests
+
+Signed-off-by: panko <prike18@gmail.com>
+(cherry picked from commit 63998cb0f98a20074cd3e60120639356b4453b72)
+---
+ Emby.Naming/Common/NamingOptions.cs           |  6 ++
+ .../Library/MovieResolverTests.cs             | 89 +++++++++++++++++++
+ 2 files changed, 95 insertions(+)
+
+diff --git a/Emby.Naming/Common/NamingOptions.cs b/Emby.Naming/Common/NamingOptions.cs
+index 9ecefb4c7b..58d6e012f9 100644
+--- a/Emby.Naming/Common/NamingOptions.cs
++++ b/Emby.Naming/Common/NamingOptions.cs
+@@ -542,6 +542,12 @@ namespace Emby.Naming.Common
+                     "samples",
+                     MediaType.Video),
+ 
++                new ExtraRule(
++                    ExtraType.Sample,
++                    ExtraRuleType.DirectoryName,
++                    "sample",
++                    MediaType.Video),
++
+                 new ExtraRule(
+                     ExtraType.Short,
+                     ExtraRuleType.DirectoryName,
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Library/MovieResolverTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Library/MovieResolverTests.cs
+index e1346a8436..3aac3cdc43 100644
+--- a/tests/Jellyfin.Server.Implementations.Tests/Library/MovieResolverTests.cs
++++ b/tests/Jellyfin.Server.Implementations.Tests/Library/MovieResolverTests.cs
+@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Entities.Movies;
+ using MediaBrowser.Controller.Entities.TV;
+ using MediaBrowser.Controller.Library;
+ using MediaBrowser.Controller.Providers;
++using MediaBrowser.Model.Configuration;
+ using MediaBrowser.Model.IO;
+ using Microsoft.Extensions.Logging;
+ using Moq;
+@@ -89,4 +90,92 @@ public class MovieResolverTests
+         Assert.All(result.Items, item => Assert.IsType<Movie>(item));
+         Assert.Single(((Video)result.Items[0]).LocalAlternateVersions);
+     }
++
++    [Fact]
++    public void AllExtrasTypesFolderNames_ContainsSampleSingularAndPlural()
++    {
++        Assert.True(_namingOptions.AllExtrasTypesFolderNames.ContainsKey("sample"));
++        Assert.True(_namingOptions.AllExtrasTypesFolderNames.ContainsKey("Sample"));
++        Assert.True(_namingOptions.AllExtrasTypesFolderNames.ContainsKey("samples"));
++    }
++
++    [Theory]
++    [InlineData("Sample")]
++    [InlineData("sample")]
++    [InlineData("SAMPLE")]
++    [InlineData("samples")]
++    public void ResolvePath_MovieFolderWithSampleSubfolder_ResolvesToMovie(string sampleDirName)
++    {
++        var libraryManager = new Mock<ILibraryManager>();
++        libraryManager.Setup(m => m.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
++        libraryManager.Setup(m => m.IgnoreFile(It.IsAny<FileSystemMetadata>(), It.IsAny<BaseItem>())).Returns(false);
++
++        var resolver = new MovieResolver(Mock.Of<IImageProcessor>(), Mock.Of<ILogger<MovieResolver>>(), _namingOptions, Mock.Of<IDirectoryService>(), _videoListResolver);
++        var args = new ItemResolveArgs(
++            Mock.Of<IServerApplicationPaths>(),
++            libraryManager.Object)
++        {
++            Parent = new Folder(),
++            CollectionType = CollectionType.movies,
++            FileInfo = new FileSystemMetadata
++            {
++                FullName = "/media/Outer Colony (2026)",
++                IsDirectory = true
++            },
++            FileSystemChildren = new[]
++            {
++                new FileSystemMetadata
++                {
++                    FullName = "/media/Outer Colony (2026)/Outer Colony (2026).mkv",
++                    Name = "Outer Colony (2026).mkv"
++                },
++                new FileSystemMetadata
++                {
++                    FullName = "/media/Outer Colony (2026)/" + sampleDirName,
++                    Name = sampleDirName,
++                    IsDirectory = true
++                }
++            }
++        };
++
++        Assert.IsType<Movie>(resolver.ResolvePath(args));
++    }
++
++    [Fact]
++    public void ResolvePath_MovieFolderWithRealSubfolder_DoesNotResolveToSingleMovie()
++    {
++        var libraryManager = new Mock<ILibraryManager>();
++        libraryManager.Setup(m => m.GetLibraryOptions(It.IsAny<BaseItem>())).Returns(new LibraryOptions());
++        libraryManager.Setup(m => m.IgnoreFile(It.IsAny<FileSystemMetadata>(), It.IsAny<BaseItem>())).Returns(false);
++
++        var resolver = new MovieResolver(Mock.Of<IImageProcessor>(), Mock.Of<ILogger<MovieResolver>>(), _namingOptions, Mock.Of<IDirectoryService>(), _videoListResolver);
++        var args = new ItemResolveArgs(
++            Mock.Of<IServerApplicationPaths>(),
++            libraryManager.Object)
++        {
++            Parent = new Folder(),
++            CollectionType = CollectionType.movies,
++            FileInfo = new FileSystemMetadata
++            {
++                FullName = "/media/Outer Colony (2026)",
++                IsDirectory = true
++            },
++            FileSystemChildren = new[]
++            {
++                new FileSystemMetadata
++                {
++                    FullName = "/media/Outer Colony (2026)/Outer Colony (2026).mkv",
++                    Name = "Outer Colony (2026).mkv"
++                },
++                new FileSystemMetadata
++                {
++                    FullName = "/media/Outer Colony (2026)/Feature",
++                    Name = "Feature",
++                    IsDirectory = true
++                }
++            }
++        };
++
++        Assert.Null(resolver.ResolvePath(args));
++    }
+ }

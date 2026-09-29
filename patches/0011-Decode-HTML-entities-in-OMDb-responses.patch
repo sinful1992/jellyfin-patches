@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Wed, 16 Sep 2026 15:49:01 +0200
+Subject: [PATCH] Decode HTML entities in OMDb responses
+
+(cherry picked from commit 46e8ec550846c555eb6fab78dc303e08c11cace8)
+---
+ .../JsonOmdbNotAvailableStringConverter.cs    |  7 ++--
+ .../Plugins/Omdb/OmdbItemProvider.cs          |  5 +--
+ .../Plugins/Omdb/OmdbProvider.cs              | 17 ++++++---
+ .../Omdb/JsonOmdbConverterTests.cs            | 35 +++++++++++++++++++
+ 4 files changed, 54 insertions(+), 10 deletions(-)
+
+diff --git a/MediaBrowser.Providers/Plugins/Omdb/JsonOmdbNotAvailableStringConverter.cs b/MediaBrowser.Providers/Plugins/Omdb/JsonOmdbNotAvailableStringConverter.cs
+index 7e9befa8c6..0278469807 100644
+--- a/MediaBrowser.Providers/Plugins/Omdb/JsonOmdbNotAvailableStringConverter.cs
++++ b/MediaBrowser.Providers/Plugins/Omdb/JsonOmdbNotAvailableStringConverter.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Net;
+ using System.Text.Json;
+ using System.Text.Json.Serialization;
+ using Jellyfin.Extensions.Json;
+@@ -6,7 +7,7 @@ using Jellyfin.Extensions.Json;
+ namespace MediaBrowser.Providers.Plugins.Omdb
+ {
+     /// <summary>
+-    /// Converts a string <c>N/A</c> to <c>string.Empty</c>.
++    /// Converts a string <c>N/A</c> to <c>string.Empty</c> and decodes HTML entities in every other string.
+     /// </summary>
+     public class JsonOmdbNotAvailableStringConverter : JsonConverter<string?>
+     {
+@@ -27,7 +28,9 @@ namespace MediaBrowser.Providers.Plugins.Omdb
+                     return null;
+                 }
+ 
+-                return str;
++                // Some OMDb records are HTML encoded, e.g. the cast of tt0093058 lists "Vincent D&apos;Onofrio".
++                // Stored verbatim that name is a second person next to the correctly spelled one.
++                return WebUtility.HtmlDecode(str);
+             }
+ 
+             return JsonSerializer.Deserialize<string?>(ref reader, options);
+diff --git a/MediaBrowser.Providers/Plugins/Omdb/OmdbItemProvider.cs b/MediaBrowser.Providers/Plugins/Omdb/OmdbItemProvider.cs
+index 7b245ea5a7..c81ada3e00 100644
+--- a/MediaBrowser.Providers/Plugins/Omdb/OmdbItemProvider.cs
++++ b/MediaBrowser.Providers/Plugins/Omdb/OmdbItemProvider.cs
+@@ -13,7 +13,6 @@ using System.Text;
+ using System.Text.Json;
+ using System.Threading;
+ using System.Threading.Tasks;
+-using Jellyfin.Extensions.Json;
+ using MediaBrowser.Common.Net;
+ using MediaBrowser.Controller.Configuration;
+ using MediaBrowser.Controller.Entities;
+@@ -45,9 +44,7 @@ namespace MediaBrowser.Providers.Plugins.Omdb
+             _libraryManager = libraryManager;
+             _omdbProvider = new OmdbProvider(_httpClientFactory, fileSystem, configurationManager);
+ 
+-            _jsonOptions = new JsonSerializerOptions(JsonDefaults.Options);
+-            _jsonOptions.Converters.Add(new JsonOmdbNotAvailableStringConverter());
+-            _jsonOptions.Converters.Add(new JsonOmdbNotAvailableInt32Converter());
++            _jsonOptions = OmdbProvider.CreateJsonOptions();
+         }
+ 
+         public string Name => "The Open Movie Database";
+diff --git a/MediaBrowser.Providers/Plugins/Omdb/OmdbProvider.cs b/MediaBrowser.Providers/Plugins/Omdb/OmdbProvider.cs
+index d51d913caa..60e4001189 100644
+--- a/MediaBrowser.Providers/Plugins/Omdb/OmdbProvider.cs
++++ b/MediaBrowser.Providers/Plugins/Omdb/OmdbProvider.cs
+@@ -45,10 +45,19 @@ namespace MediaBrowser.Providers.Plugins.Omdb
+             _fileSystem = fileSystem;
+             _configurationManager = configurationManager;
+ 
+-            _jsonOptions = new JsonSerializerOptions(JsonDefaults.Options);
+-            // These converters need to take priority
+-            _jsonOptions.Converters.Insert(0, new JsonOmdbNotAvailableStringConverter());
+-            _jsonOptions.Converters.Insert(0, new JsonOmdbNotAvailableInt32Converter());
++            _jsonOptions = CreateJsonOptions();
++        }
++
++        /// <summary>Creates the <see cref="JsonSerializerOptions"/> to read OMDB responses with.</summary>
++        /// <returns>The options.</returns>
++        internal static JsonSerializerOptions CreateJsonOptions()
++        {
++            var options = new JsonSerializerOptions(JsonDefaults.Options);
++            // These have to be inserted, appending leaves the default string converter ahead of them
++            options.Converters.Insert(0, new JsonOmdbNotAvailableStringConverter());
++            options.Converters.Insert(0, new JsonOmdbNotAvailableInt32Converter());
++
++            return options;
+         }
+ 
+         /// <summary>Fetches data from OMDB service.</summary>
+diff --git a/tests/Jellyfin.Providers.Tests/Omdb/JsonOmdbConverterTests.cs b/tests/Jellyfin.Providers.Tests/Omdb/JsonOmdbConverterTests.cs
+index 3062cb7b42..0275d13242 100644
+--- a/tests/Jellyfin.Providers.Tests/Omdb/JsonOmdbConverterTests.cs
++++ b/tests/Jellyfin.Providers.Tests/Omdb/JsonOmdbConverterTests.cs
+@@ -63,6 +63,41 @@ namespace Jellyfin.Providers.Tests.Omdb
+             Assert.Equal(expected, result);
+         }
+ 
++        [Theory]
++        [InlineData("\"Vincent D&apos;Onofrio\"", "Vincent D'Onofrio")]
++        [InlineData("\"Alan Moore &#39;Swamp Thing&#39;\"", "Alan Moore 'Swamp Thing'")]
++        [InlineData("\"Tom &amp; Jerry\"", "Tom & Jerry")]
++        [InlineData("\"Mail &lt;a@b.com&gt; for a translation\"", "Mail <a@b.com> for a translation")]
++        [InlineData("\"Elisa Mont\\u00e9s\"", "Elisa Montés")]
++        [InlineData("\"R&D and 100% & more\"", "R&D and 100% & more")]
++        public void Deserialize_Html_Encoded_String_Is_Decoded(string input, string expected)
++        {
++            var result = JsonSerializer.Deserialize<string?>(input, _options);
++            Assert.Equal(expected, result);
++        }
++
++        [Fact]
++        public void Deserialize_Html_Encoded_Credits_Are_Decoded()
++        {
++            const string Input = "{\"Title\":\"Full Metal Jacket\",\"Actors\":\"Matthew Modine, R. Lee Ermey, Vincent D&apos;Onofrio\",\"Response\":\"True\"}";
++            var rootObject = JsonSerializer.Deserialize<OmdbProvider.RootObject>(Input, _options);
++            Assert.NotNull(rootObject);
++            Assert.Equal("Matthew Modine, R. Lee Ermey, Vincent D'Onofrio", rootObject!.Actors);
++        }
++
++        [Fact]
++        public void ProviderJsonOptions_Take_Priority_Over_The_Defaults()
++        {
++            // The default string converter handles string as well, so appending the OMDb ones would never run them
++            var options = OmdbProvider.CreateJsonOptions();
++
++            const string Input = "{\"Title\":\"Full Metal Jacket\",\"Actors\":\"Vincent D&apos;Onofrio\",\"Awards\":\"N/A\",\"Response\":\"True\"}";
++            var rootObject = JsonSerializer.Deserialize<OmdbProvider.RootObject>(Input, options);
++            Assert.NotNull(rootObject);
++            Assert.Equal("Vincent D'Onofrio", rootObject!.Actors);
++            Assert.Null(rootObject.Awards);
++        }
++
+         [Fact]
+         public void Roundtrip_Valid_Success()
+         {

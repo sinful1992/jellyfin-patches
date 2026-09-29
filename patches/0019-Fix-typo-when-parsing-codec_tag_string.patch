@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nyanmisaka <nst799610810@gmail.com>
+Date: Tue, 22 Sep 2026 13:34:45 +0800
+Subject: [PATCH] Fix typo when parsing codec_tag_string
+
+Fixes a6da575785e678e64ed03978d1f4f60a80423121
+
+Signed-off-by: nyanmisaka <nst799610810@gmail.com>
+(cherry picked from commit e4c0ccb3291a59ac6fe4894b9e760e6b626074bb)
+---
+ MediaBrowser.MediaEncoding/Probing/MediaStreamInfo.cs | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/MediaBrowser.MediaEncoding/Probing/MediaStreamInfo.cs b/MediaBrowser.MediaEncoding/Probing/MediaStreamInfo.cs
+index f631c471f6..17ab378ef7 100644
+--- a/MediaBrowser.MediaEncoding/Probing/MediaStreamInfo.cs
++++ b/MediaBrowser.MediaEncoding/Probing/MediaStreamInfo.cs
+@@ -198,10 +198,10 @@ namespace MediaBrowser.MediaEncoding.Probing
+         public string? CodecTag { get; set; }
+ 
+         /// <summary>
+-        /// Gets or sets the codec_tag_string?.
++        /// Gets or sets the codec_tag_string.
+         /// </summary>
+-        /// <value>The codec_tag_string?.</value>
+-        [JsonPropertyName("codec_tag_string?")]
++        /// <value>The codec_tag_string.</value>
++        [JsonPropertyName("codec_tag_string")]
+         public string? CodecTagString { get; set; }
+ 
+         /// <summary>
