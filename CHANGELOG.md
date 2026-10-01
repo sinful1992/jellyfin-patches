@@ -3,6 +3,13 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p5 — 2026-10-01
+
+**Fix: surround sound lost when audio is transcoded for the Living Room TV.** Multichannel sources (TrueHD 7.1 on
+17 films with a remembered TrueHD track) were converted to AAC 5.1, which the TV app decodes to PCM and the TV
+outputs as stereo. For 6+ channel input Jellyfin now prefers E-AC3/AC3 when the client lists them; the TV bitstreams
+E-AC3 5.1 to the soundbar. New replaced assembly: `MediaBrowser.Controller` (private method only, no API change).
+
 ## 12.1-p4 — 2026-10-01
 
 Base `v12.1` · image `jellyfin-patched:12.1-p4`

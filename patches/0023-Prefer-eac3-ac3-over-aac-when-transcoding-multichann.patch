@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Thu, 1 Oct 2026 11:51:59 +0100
+Subject: [PATCH] Prefer eac3/ac3 over aac when transcoding multichannel audio
+
+ShiftAudioCodecsIfNeeded only demoted dts/truehd for 6+ channel input, so
+a client listing "aac,ac3,eac3,mp3" (Jellyfin Android TV 0.20.0-hero.31)
+got AAC 5.1 for every TrueHD 7.1 source. Android TV decodes AAC to PCM,
+and the Sony KD-65X75WL's app-facing PCM output is stereo-only, so the
+soundbar received stereo. Native E-AC3 on the same TV is bitstreamed
+(AudioTrack enc=eac3, 5.1).
+
+For 6+ channel input, move eac3 then ac3 to the front when the client
+lists them. Channel and bitrate caps for both already exist (6 ch,
+640 kbps), so 7.1 sources become 5.1 E-AC3.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../MediaEncoding/EncodingHelper.cs              | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+index 6f010c0242..aef51a8070 100644
+--- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
++++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+@@ -7601,6 +7601,22 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 audioCodecs.RemoveAt(0);
+                 audioCodecs.Add(removed);
+             }
++
++            if (inputChannels >= 6)
++            {
++                // A client that lists eac3/ac3 can bitstream them to an AV receiver, while multichannel aac has to be
++                // decoded to PCM on the client, which many TV apps can only output as stereo. Keep surround: prefer them.
++                foreach (var codec in new[] { "ac3", "eac3" })
++                {
++                    var index = audioCodecs.FindIndex(i => string.Equals(i, codec, StringComparison.OrdinalIgnoreCase));
++                    if (index > 0)
++                    {
++                        var preferred = audioCodecs[index];
++                        audioCodecs.RemoveAt(index);
++                        audioCodecs.Insert(0, preferred);
++                    }
++                }
++            }
+         }
+ 
+         private void ShiftVideoCodecsIfNeeded(List<string> videoCodecs, EncodingOptions encodingOptions)
