@@ -8,10 +8,14 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p5`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**DEPLOYED 2026-10-01 11:54** (idle-gated). Live: healthy, 0 ERR/FTL, Intro Skipper loaded. Verified on the Living Room TV with Minions (remembered TrueHD 7.1): ffmpeg `-codec:v:0 copy`, audio `ac3 -ac 6 -ab 640000`; ExoPlayer `audioTrackInit enc=ac3, 5.1` (bitstreamed, no decoder); video layer `BT2020_ITU_PQ`, HDR metadata present. Rollback = `image: jellyfin-patched:12.1-p4` (compose backup `docker-compose.yml.bak-20261001-p4`), no migrations.
+
 **Fix: surround sound lost when audio is transcoded for the Living Room TV.** Multichannel sources (TrueHD 7.1 on
 17 films with a remembered TrueHD track) were converted to AAC 5.1, which the TV app decodes to PCM and the TV
-outputs as stereo. For 6+ channel input Jellyfin now prefers E-AC3/AC3 when the client lists them; the TV bitstreams
-E-AC3 5.1 to the soundbar. New replaced assembly: `MediaBrowser.Controller` (private method only, no API change).
+outputs as stereo. For 6+ channel input Jellyfin now prefers E-AC3/AC3 when the client lists them. In practice the
+result is **AC3 5.1 at 640 kbps**: `eac3` is not in Jellyfin's `_requiredEncoders` list, so `CanEncodeToAudioCodec("eac3")`
+is false and AC3 is the first usable codec. The TV bitstreams it to the soundbar. New replaced assembly:
+`MediaBrowser.Controller` (private method only, no API change).
 
 ### Added
 - Prefer eac3/ac3 over aac when transcoding multichannel audio
