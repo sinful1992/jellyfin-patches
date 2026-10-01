@@ -8,6 +8,11 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p5`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**Fix: surround sound lost when audio is transcoded for the Living Room TV.** Multichannel sources (TrueHD 7.1 on
+17 films with a remembered TrueHD track) were converted to AAC 5.1, which the TV app decodes to PCM and the TV
+outputs as stereo. For 6+ channel input Jellyfin now prefers E-AC3/AC3 when the client lists them; the TV bitstreams
+E-AC3 5.1 to the soundbar. New replaced assembly: `MediaBrowser.Controller` (private method only, no API change).
+
 ### Added
 - Prefer eac3/ac3 over aac when transcoding multichannel audio
 
@@ -45,13 +50,6 @@ Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cd
 - Merge the hand-written 12.1-p4 changelog entry into the generated one
 
 Assemblies replaced: Emby.Naming.dll, Emby.Server.Implementations.dll, Jellyfin.Api.dll, Jellyfin.Server.Implementations.dll, MediaBrowser.Controller.dll, MediaBrowser.MediaEncoding.dll, MediaBrowser.Providers.dll
-
-## 12.1-p5 — 2026-10-01
-
-**Fix: surround sound lost when audio is transcoded for the Living Room TV.** Multichannel sources (TrueHD 7.1 on
-17 films with a remembered TrueHD track) were converted to AAC 5.1, which the TV app decodes to PCM and the TV
-outputs as stereo. For 6+ channel input Jellyfin now prefers E-AC3/AC3 when the client lists them; the TV bitstreams
-E-AC3 5.1 to the soundbar. New replaced assembly: `MediaBrowser.Controller` (private method only, no API change).
 
 ## 12.1-p4 — 2026-10-01
 
