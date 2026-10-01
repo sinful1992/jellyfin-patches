@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Thu, 1 Oct 2026 10:51:44 +0100
+Subject: [PATCH] Only label Dolby Vision in HLS for clients that declared DOVI
+ support
+
+A copied DV profile 8.x stream got SUPPLEMENTAL-CODECS="dvh1.08.06/db1p"
+on its variant regardless of what the client asked for. The master
+playlist also carries an H.264 SDR entrance at the same BANDWIDTH.
+ExoPlayer (Jellyfin Android TV 0.20.0-hero.31 on a Sony KD-65X75WL)
+parses the tag as video/dolby-vision and picks the H.264 entrance, so an
+audio-only transcode (TrueHD -> AAC) became a full 4K software HEVC
+decode + h264_vaapi encode at ~1.0x realtime. The same request for an
+HDR10 file without DV picks the hvc1 variant and copies video.
+
+Apply the rule the P5 variant above already uses: emit the DV label only
+when the request's range types include a DOVI type. The video is still
+copied untouched; only the playlist label changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Jellyfin.Api/Helpers/DynamicHlsHelper.cs | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/Jellyfin.Api/Helpers/DynamicHlsHelper.cs b/Jellyfin.Api/Helpers/DynamicHlsHelper.cs
+index 4995d37f4b..62b389f24c 100644
+--- a/Jellyfin.Api/Helpers/DynamicHlsHelper.cs
++++ b/Jellyfin.Api/Helpers/DynamicHlsHelper.cs
+@@ -538,7 +538,14 @@ public class DynamicHlsHelper
+ 
+         if (EncodingHelper.IsDovi(state.VideoStream) && !_encodingHelper.IsDoviRemoved(state))
+         {
+-            AppendDvString();
++            // Only label Dovi for clients that explicitly declared DOVI support, same rule as the P5 variant above.
++            // ExoPlayer parses the tag as video/dolby-vision, may only reach it through a decoder fallback, and then
++            // picks the same-BANDWIDTH H.264 SDR entrance instead: a full re-encode of a stream it could have copied.
++            if (state.GetRequestedRangeTypes(state.VideoStream.Codec)
++                .Any(rangeType => rangeType.StartsWith("DOVI", StringComparison.OrdinalIgnoreCase)))
++            {
++                AppendDvString();
++            }
+         }
+         else if (EncodingHelper.IsHdr10Plus(state.VideoStream) && !_encodingHelper.IsHdr10PlusRemoved(state))
+         {
