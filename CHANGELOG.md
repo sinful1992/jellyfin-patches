@@ -8,6 +8,13 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p4`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**Fix: 4K Dolby Vision titles fully re-encoded on the Living Room TV when only the audio needed converting.**
+A DV profile 8 stream copied into HLS was labelled `SUPPLEMENTAL-CODECS="dvh1…"` for every client. The TV app
+(hero.31, ExoPlayer) treats that variant as Dolby Vision and takes the same-bandwidth H.264 SDR fallback instead,
+so a TrueHD→AAC audio transcode became a full 4K software HEVC decode (Minions 2026-09-30: CPU pinned for 1h19m, 1.06x).
+Now the DV label is only emitted when the client's request declares a DOVI range type — the rule upstream already
+applies to the profile 5 variant. Video is still copied untouched. New replaced assembly: `Jellyfin.Api`.
+
 ### Added
 - Only label Dolby Vision in HLS for clients that declared DOVI support
 
@@ -43,17 +50,6 @@ Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cd
 - Deploy 12.1-p3 to the live server
 
 Assemblies replaced: Emby.Naming.dll, Emby.Server.Implementations.dll, Jellyfin.Api.dll, Jellyfin.Server.Implementations.dll, MediaBrowser.MediaEncoding.dll, MediaBrowser.Providers.dll
-
-## 12.1-p4 — 2026-10-01
-
-Base `v12.1` · image `jellyfin-patched:12.1-p4`
-
-**Fix: 4K Dolby Vision titles fully re-encoded on the Living Room TV when only the audio needed converting.**
-A DV profile 8 stream copied into HLS was labelled `SUPPLEMENTAL-CODECS="dvh1…"` for every client. The TV app
-(hero.31, ExoPlayer) treats that variant as Dolby Vision and takes the same-bandwidth H.264 SDR fallback instead,
-so a TrueHD→AAC audio transcode became a full 4K software HEVC decode (Minions 2026-09-30: CPU pinned for 1h19m, 1.06x).
-Now the DV label is only emitted when the client's request declares a DOVI range type — the rule upstream already
-applies to the profile 5 variant. Video is still copied untouched. New replaced assembly: `Jellyfin.Api`.
 
 ## 12.1-p3 — 2026-09-29
 
