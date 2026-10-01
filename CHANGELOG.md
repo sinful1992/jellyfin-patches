@@ -8,6 +8,8 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p4`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95`
 
+**DEPLOYED 2026-10-01 10:59** (idle-gated). Live: healthy in 2 s, 0 ERR/FTL, Intro Skipper 12.0.4.0 loaded. Verified on the Living Room TV: Minions (DV P8.1 + remembered TrueHD) → ExoPlayer `[X]` hvc1 variant, ffmpeg `-codec:v:0 copy`, `IsVideoDirect=True`, BT2020/PQ 10-bit at the TV, ffmpeg ~2% CPU once throttled (was 1h19m pinned). DOVI-declaring request still gets `SUPPLEMENTAL-CODECS="dvh1.08.06/db1p"`. Rollback = `image: jellyfin-patched:12.1-p3` (compose backup `docker-compose.yml.bak-20261001-p3`), no migrations.
+
 **Fix: 4K Dolby Vision titles fully re-encoded on the Living Room TV when only the audio needed converting.**
 A DV profile 8 stream copied into HLS was labelled `SUPPLEMENTAL-CODECS="dvh1…"` for every client. The TV app
 (hero.31, ExoPlayer) treats that variant as Dolby Vision and takes the same-bandwidth H.264 SDR fallback instead,
