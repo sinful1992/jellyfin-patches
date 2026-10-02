@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=C3=8Dcar?= <personal@icarns.xyz>
+Date: Fri, 25 Sep 2026 00:36:04 +0200
+Subject: [PATCH] Use MusicBrainz artist name first
+
+(cherry picked from commit c64cfa5a0b6a9125b0196cb1ea399f7350da8989)
+---
+ .../Plugins/MusicBrainz/MusicBrainzAlbumProvider.cs             | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/MediaBrowser.Providers/Plugins/MusicBrainz/MusicBrainzAlbumProvider.cs b/MediaBrowser.Providers/Plugins/MusicBrainz/MusicBrainzAlbumProvider.cs
+index 55913aa3fc..d8e6acae17 100644
+--- a/MediaBrowser.Providers/Plugins/MusicBrainz/MusicBrainzAlbumProvider.cs
++++ b/MediaBrowser.Providers/Plugins/MusicBrainz/MusicBrainzAlbumProvider.cs
+@@ -290,7 +290,7 @@ public class MusicBrainzAlbumProvider : IRemoteMetadataProvider<MusicAlbum, Albu
+         if (artistCredit is not null && artistCredit.Count > 0)
+         {
+             item.AlbumArtists = artistCredit
+-                .Select(credit => credit.Name)
++                .Select(credit => credit.Artist?.Name ?? credit.Name)
+                 .Where(name => !string.IsNullOrWhiteSpace(name))
+                 .ToArray();
+         }

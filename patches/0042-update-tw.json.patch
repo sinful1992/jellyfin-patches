@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E2=88=80llex?= <allexjuang@users.noreply.github.com>
+Date: Sat, 19 Sep 2026 23:12:14 +0800
+Subject: [PATCH] update tw.json
+
+rating returned from TMDB, ratingStrings not match
+
+(cherry picked from commit 529a54ebdfeec480c7ed1295efbde39913b5cb4b)
+---
+ .../Localization/Ratings/tw.json                       | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Localization/Ratings/tw.json b/Emby.Server.Implementations/Localization/Ratings/tw.json
+index a7869c1221..9af7dd3128 100644
+--- a/Emby.Server.Implementations/Localization/Ratings/tw.json
++++ b/Emby.Server.Implementations/Localization/Ratings/tw.json
+@@ -3,35 +3,35 @@
+     "supportsSubScores": false,
+     "ratings": [
+         {
+-            "ratingStrings": ["0+"],
++            "ratingStrings": ["0+", "普遍級", "普"],
+             "ratingScore": {
+                 "score": 0,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["6+"],
++            "ratingStrings": ["6+", "保護級", "護"],
+             "ratingScore": {
+                 "score": 6,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["12+"],
++            "ratingStrings": ["12+", "輔12級", "輔導12歲級", "輔導級"],
+             "ratingScore": {
+                 "score": 12,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["15+"],
++            "ratingStrings": ["15+", "輔15級", "輔導15歲級"],
+             "ratingScore": {
+                 "score": 15,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["18+"],
++            "ratingStrings": ["18+", "限制級", "限"],
+             "ratingScore": {
+                 "score": 18,
+                 "subScore": null

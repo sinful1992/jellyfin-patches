@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Sun, 20 Sep 2026 08:40:39 +0200
+Subject: [PATCH] Don't apply the allowed tags filter to by-name items
+
+(cherry picked from commit 53f08961cf2413a5660bed346ac9440ad96c0c53)
+---
+ .../Item/BaseItemRepository.ByName.cs                      | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/Jellyfin.Server.Implementations/Item/BaseItemRepository.ByName.cs b/Jellyfin.Server.Implementations/Item/BaseItemRepository.ByName.cs
+index 51ac146a6f..4199f83c21 100644
+--- a/Jellyfin.Server.Implementations/Item/BaseItemRepository.ByName.cs
++++ b/Jellyfin.Server.Implementations/Item/BaseItemRepository.ByName.cs
+@@ -223,7 +223,12 @@ public sealed partial class BaseItemRepository
+             Years = filter.Years,
+             NameContains = filter.NameContains,
+             SearchTerm = filter.SearchTerm,
+-            ExcludeItemIds = filter.ExcludeItemIds
++            ExcludeItemIds = filter.ExcludeItemIds,
++
++            // A genre, studio or artist carries none of the tags of the media it describes, so an
++            // allow list can only ever hide all of them. Reachability is settled by innerQueryFilter
++            // instead: a value gets this far only when an item the user may see carries it.
++            IncludeInheritedTags = []
+         };
+ 
+         // Collapse rows that share a PresentationUniqueKey (e.g. alternate versions) into one

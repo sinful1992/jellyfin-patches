@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Marti Markov <marti.markov@icloud.com>
+Date: Sat, 19 Sep 2026 15:47:48 +0200
+Subject: [PATCH] Fix the item type name of BaseItemKind.Channel
+
+(cherry picked from commit 9ef2be77e87ed3abf3f8610418b1d66eb489ed75)
+---
+ .../Data/ItemTypeLookup.cs                    |  2 +-
+ .../Data/ItemTypeLookupTests.cs               | 26 +++++++++++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+ create mode 100644 tests/Jellyfin.Server.Implementations.Tests/Data/ItemTypeLookupTests.cs
+
+diff --git a/Emby.Server.Implementations/Data/ItemTypeLookup.cs b/Emby.Server.Implementations/Data/ItemTypeLookup.cs
+index 82c0a8b6c5..03117f6de5 100644
+--- a/Emby.Server.Implementations/Data/ItemTypeLookup.cs
++++ b/Emby.Server.Implementations/Data/ItemTypeLookup.cs
+@@ -1,8 +1,8 @@
+ using System.Collections.Frozen;
+ using System.Collections.Generic;
+-using System.Threading.Channels;
+ using Emby.Server.Implementations.Playlists;
+ using Jellyfin.Data.Enums;
++using MediaBrowser.Controller.Channels;
+ using MediaBrowser.Controller.Entities;
+ using MediaBrowser.Controller.Entities.Audio;
+ using MediaBrowser.Controller.Entities.Movies;
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Data/ItemTypeLookupTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Data/ItemTypeLookupTests.cs
+new file mode 100644
+index 0000000000..a60622902b
+--- /dev/null
++++ b/tests/Jellyfin.Server.Implementations.Tests/Data/ItemTypeLookupTests.cs
+@@ -0,0 +1,26 @@
++using System;
++using System.Linq;
++using Emby.Server.Implementations.Data;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Controller.Entities;
++using Xunit;
++
++namespace Jellyfin.Server.Implementations.Tests.Data;
++
++public class ItemTypeLookupTests
++{
++    public static TheoryData<BaseItemKind> MappedKinds()
++        => new(new ItemTypeLookup().BaseItemKindNames.Keys);
++
++    [Theory]
++    [MemberData(nameof(MappedKinds))]
++    public void BaseItemKindNames_Kind_NamesAnItemType(BaseItemKind kind)
++    {
++        var name = new ItemTypeLookup().BaseItemKindNames[kind];
++
++        var type = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType(name)).FirstOrDefault(t => t is not null);
++
++        Assert.NotNull(type);
++        Assert.True(typeof(BaseItem).IsAssignableFrom(type), $"{name} is not an item type.");
++    }
++}

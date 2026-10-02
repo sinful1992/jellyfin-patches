@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: theguymadmax <theguymadmax@proton.me>
+Date: Tue, 15 Sep 2026 17:28:02 -0400
+Subject: [PATCH] Fix formatting issue in PlayCommandQueueTests
+
+(cherry picked from commit 19d14a8c11f262dfb0df38d05a2d7de9e1017a27)
+---
+ .../SessionManager/PlayCommandQueueTests.cs                     | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/SessionManager/PlayCommandQueueTests.cs b/tests/Jellyfin.Server.Implementations.Tests/SessionManager/PlayCommandQueueTests.cs
+index a07e79baa3..13081dcff9 100644
+--- a/tests/Jellyfin.Server.Implementations.Tests/SessionManager/PlayCommandQueueTests.cs
++++ b/tests/Jellyfin.Server.Implementations.Tests/SessionManager/PlayCommandQueueTests.cs
+@@ -34,7 +34,7 @@ public class PlayCommandQueueTests : IDisposable
+     /// folder, so the queue query cannot exclude it. Such an item has no media sources, and a
+     /// client that reaches it in the queue gets an error instead of the next track.
+     /// </summary>
+-    /// <returns><placeholder>A <see cref="Task"/> representing the asynchronous unit test.</placeholder></returns>
++    /// <returns>A <see cref="Task"/> representing the asynchronous unit test.</returns>
+     [Fact]
+     public async Task SendPlayCommand_GenreTaggingAnArtist_QueuesOnlyPlayableItems()
+     {

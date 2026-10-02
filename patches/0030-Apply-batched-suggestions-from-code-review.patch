@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim Eisele <Tim_Eisele@web.de>
+Date: Tue, 15 Sep 2026 21:13:19 +0200
+Subject: [PATCH] Apply batched suggestions from code review
+
+Co-authored-by: theguymadmax <theguymadmax@proton.me>
+(cherry picked from commit 3c301e72a2c3406a8625b39e47f8fa4c7913bb3d)
+---
+ .../Localization/Ratings/ar.json               | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Localization/Ratings/ar.json b/Emby.Server.Implementations/Localization/Ratings/ar.json
+index c5ff92a920..20053fe575 100644
+--- a/Emby.Server.Implementations/Localization/Ratings/ar.json
++++ b/Emby.Server.Implementations/Localization/Ratings/ar.json
+@@ -3,14 +3,21 @@
+     "supportsSubScores": false,
+     "ratings": [
+         {
+-            "ratingStrings": ["ATP", "Apta para todo público"],
++            "ratingStrings": ["ATP", "Apta para todo público", "G"],
+             "ratingScore": {
+                 "score": 0,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["+13", "SAM 13", "SAM13"],
++            "ratingStrings": ["SP"],
++            "ratingScore": {
++                "score": 10,
++                "subScore": null
++            }
++        },
++        {
++            "ratingStrings": ["+13", "SAM 13", "SAM13", "R-13"],
+             "ratingScore": {
+                 "score": 13,
+                 "subScore": null
+@@ -23,6 +30,13 @@
+                 "subScore": null
+             }
+         },
++        {
++            "ratingStrings": ["R-17"],
++            "ratingScore": {
++                "score": 17,
++                "subScore": null
++            }
++        },
+         {
+             "ratingStrings": ["+18", "SAM 18", "SAM18"],
+             "ratingScore": {

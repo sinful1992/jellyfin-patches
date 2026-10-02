@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Wed, 16 Sep 2026 21:22:06 +0200
+Subject: [PATCH] Never treat an empty library location set as grounds for
+ deletion
+
+(cherry picked from commit d284cad9c9b8310e6c0767366ad1cc154b269c9e)
+---
+ .../20260113120000_MigrateLinkedChildren.cs   |  31 ++-
+ .../MigrateLinkedChildrenStaleItemsTests.cs   | 177 ++++++++++++++++++
+ 2 files changed, 202 insertions(+), 6 deletions(-)
+ create mode 100644 tests/Jellyfin.Server.Tests/Migrations/MigrateLinkedChildrenStaleItemsTests.cs
+
+diff --git a/Jellyfin.Server/Migrations/Routines/20260113120000_MigrateLinkedChildren.cs b/Jellyfin.Server/Migrations/Routines/20260113120000_MigrateLinkedChildren.cs
+index 8f239007d8..226d4446ff 100644
+--- a/Jellyfin.Server/Migrations/Routines/20260113120000_MigrateLinkedChildren.cs
++++ b/Jellyfin.Server/Migrations/Routines/20260113120000_MigrateLinkedChildren.cs
+@@ -415,8 +415,12 @@ internal class MigrateLinkedChildren : IDatabaseMigrationRoutine
+         // An item outside every library location is normally left over from a removed media path, but
+         // it looks exactly the same as one whose storage failed to mount (a wrong bind mount on the
+         // first container start, for example). Only act on it while every location is readable.
+-        var canRemoveUnrootedItems = inaccessiblePaths.Count == 0;
++        // Resolving no locations at all is the same hazard with none of the evidence: it cannot be
++        // told apart from an install that has libraries the server has not read yet, and acting on it
++        // means every file-backed item in the database is outside every location.
++        var canRemoveUnrootedItems = inaccessiblePaths.Count == 0 && allLibraryPaths.Count > 0;
+         var skippedUnrootedItems = 0;
++        var removedUnrootedItems = 0;
+ 
+         var staleIds = new List<Guid>();
+         var checkedCount = 0;
+@@ -463,6 +467,7 @@ internal class MigrateLinkedChildren : IDatabaseMigrationRoutine
+                 {
+                     _logger.LogDebug("Removing item {ItemId}: path {Path} is outside every library location.", item.Id, path);
+                     staleIds.Add(item.Id);
++                    removedUnrootedItems++;
+                 }
+                 else
+                 {
+@@ -475,10 +480,19 @@ internal class MigrateLinkedChildren : IDatabaseMigrationRoutine
+ 
+         if (skippedUnrootedItems > 0)
+         {
+-            _logger.LogWarning(
+-                "Keeping {Count} items that are outside every library location because {LocationCount} library location(s) are currently unavailable.",
+-                skippedUnrootedItems,
+-                inaccessiblePaths.Count);
++            if (allLibraryPaths.Count == 0)
++            {
++                _logger.LogWarning(
++                    "Keeping {Count} items that are outside every library location because this server resolved no library locations at all.",
++                    skippedUnrootedItems);
++            }
++            else
++            {
++                _logger.LogWarning(
++                    "Keeping {Count} items that are outside every library location because {LocationCount} library location(s) are currently unavailable.",
++                    skippedUnrootedItems,
++                    inaccessiblePaths.Count);
++            }
+         }
+ 
+         if (staleIds.Count == 0)
+@@ -487,7 +501,12 @@ internal class MigrateLinkedChildren : IDatabaseMigrationRoutine
+             return;
+         }
+ 
+-        _logger.LogInformation("Found {Count} stale items to remove.", staleIds.Count);
++        // Whether an item went because its own file is gone or because nothing claims its path is the
++        // difference between a handful of deletions and a whole library, so report the split.
++        _logger.LogInformation(
++            "Found {Count} stale items to remove, {UnrootedCount} of them because their path is outside every library location.",
++            staleIds.Count,
++            removedUnrootedItems);
+ 
+         var deleted = ResolveAndDeleteItems(staleIds, "items with missing files");
+ 
+diff --git a/tests/Jellyfin.Server.Tests/Migrations/MigrateLinkedChildrenStaleItemsTests.cs b/tests/Jellyfin.Server.Tests/Migrations/MigrateLinkedChildrenStaleItemsTests.cs
+new file mode 100644
+index 0000000000..974e687296
+--- /dev/null
++++ b/tests/Jellyfin.Server.Tests/Migrations/MigrateLinkedChildrenStaleItemsTests.cs
+@@ -0,0 +1,177 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Threading;
++using Jellyfin.Database.Implementations;
++using Jellyfin.Database.Implementations.Entities;
++using Jellyfin.Database.Implementations.Locking;
++using Jellyfin.Database.Providers.Sqlite;
++using Jellyfin.Server.Migrations.Routines;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.Audio;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Model.Entities;
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.Extensions.Logging.Abstractions;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Server.Tests.Migrations;
++
++/// <summary>
++/// Covers which items the stale file cleanup is allowed to delete. Resolving no library locations at
++/// all puts every file-backed item outside every location, so acting on that emptied whole libraries.
++/// </summary>
++public sealed class MigrateLinkedChildrenStaleItemsTests : IDisposable
++{
++    private readonly SqliteConnection _connection;
++    private readonly DbContextOptions<JellyfinDbContext> _dbOptions;
++    private readonly IApplicationPaths _applicationPaths;
++    private readonly string _root;
++
++    public MigrateLinkedChildrenStaleItemsTests()
++    {
++        _applicationPaths = new Mock<IApplicationPaths>().Object;
++        _root = Path.Combine(Path.GetTempPath(), "jf-stale-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(Path.Combine(_root, "media"));
++
++        _connection = new SqliteConnection("Data Source=:memory:");
++        _connection.Open();
++
++        _dbOptions = new DbContextOptionsBuilder<JellyfinDbContext>()
++            .UseSqlite(_connection)
++            .Options;
++
++        using var context = CreateDbContext();
++        context.Database.EnsureCreated();
++    }
++
++    [Fact]
++    public void Perform_NoLibraryLocationsResolved_KeepsEverything()
++    {
++        var itemId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
++        SeedItem(itemId, SeedMediaFile("kept.flac"));
++
++        var deleted = Perform(libraryLocations: []);
++
++        Assert.Empty(deleted);
++    }
++
++    [Fact]
++    public void Perform_ItemOutsideEveryLocation_IsRemoved()
++    {
++        var itemId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
++
++        // An empty location counts as inaccessible, which disables the removal on purpose, so the
++        // library has to hold something for this case to be reachable at all.
++        SeedMediaFile("anchor.flac");
++        SeedItem(itemId, Path.Combine(_root, "removed-media", "gone.flac"));
++
++        var deleted = Perform(libraryLocations: [Path.Combine(_root, "media")]);
++
++        Assert.Equal([itemId], deleted);
++    }
++
++    [Fact]
++    public void Perform_ItemInsideLocationWithMissingFile_IsRemoved()
++    {
++        var itemId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
++        SeedMediaFile("anchor.flac");
++        SeedItem(itemId, Path.Combine(_root, "media", "deleted.flac"));
++
++        var deleted = Perform(libraryLocations: [Path.Combine(_root, "media")]);
++
++        Assert.Equal([itemId], deleted);
++    }
++
++    [Fact]
++    public void Perform_ItemInsideLocationWithFilePresent_IsKept()
++    {
++        var itemId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
++        SeedItem(itemId, SeedMediaFile("present.flac"));
++
++        var deleted = Perform(libraryLocations: [Path.Combine(_root, "media")]);
++
++        Assert.Empty(deleted);
++    }
++
++    public void Dispose()
++    {
++        _connection.Dispose();
++        if (Directory.Exists(_root))
++        {
++            Directory.Delete(_root, true);
++        }
++    }
++
++    private JellyfinDbContext CreateDbContext() => new(
++        _dbOptions,
++        NullLogger<JellyfinDbContext>.Instance,
++        new SqliteDatabaseProvider(_applicationPaths, NullLogger<SqliteDatabaseProvider>.Instance),
++        new NoLockBehavior(NullLogger<NoLockBehavior>.Instance));
++
++    private string SeedMediaFile(string name)
++    {
++        var path = Path.Combine(_root, "media", name);
++        File.WriteAllBytes(path, [0]);
++        return path;
++    }
++
++    private void SeedItem(Guid id, string path)
++    {
++        using var context = CreateDbContext();
++        context.BaseItems.Add(new BaseItemEntity
++        {
++            Id = id,
++            Type = typeof(Audio).FullName!,
++            Name = Path.GetFileNameWithoutExtension(path),
++            Path = path,
++            IsFolder = false,
++            IsVirtualItem = false
++        });
++        context.SaveChanges();
++    }
++
++    private IReadOnlyList<Guid> Perform(string[] libraryLocations)
++    {
++        var deleted = new List<Guid>();
++
++        var libraryManager = new Mock<ILibraryManager>();
++        libraryManager
++            .Setup(l => l.GetVirtualFolders())
++            .Returns(libraryLocations.Length == 0
++                ? []
++                : [new VirtualFolderInfo { Locations = libraryLocations }]);
++        libraryManager
++            .Setup(l => l.GetItemById(It.IsAny<Guid>()))
++            .Returns<Guid>(id => new Audio { Id = id });
++        libraryManager
++            .Setup(l => l.DeleteItem(It.IsAny<BaseItem>(), It.IsAny<DeleteOptions>()))
++            .Callback<BaseItem, DeleteOptions>((item, _) => deleted.Add(item.Id));
++
++        var appHost = new Mock<IServerApplicationHost>();
++        appHost.Setup(h => h.ExpandVirtualPath(It.IsAny<string>())).Returns<string>(p => p);
++
++        var appPaths = new Mock<IServerApplicationPaths>();
++        appPaths.SetupGet(p => p.DataPath).Returns(Path.Combine(_root, "data"));
++        appPaths.SetupGet(p => p.InternalMetadataPath).Returns(Path.Combine(_root, "metadata"));
++
++        var factory = new Mock<IDbContextFactory<JellyfinDbContext>>();
++        factory.Setup(f => f.CreateDbContext()).Returns(CreateDbContext);
++        factory.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(CreateDbContext);
++
++        new MigrateLinkedChildren(
++            NullLoggerFactory.Instance,
++            factory.Object,
++            libraryManager.Object,
++            appHost.Object,
++            appPaths.Object)
++            .Perform();
++
++        return deleted;
++    }
++}

@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TheDreadPirate <solidsnake1298@gmail.com>
+Date: Mon, 21 Sep 2026 22:40:08 -0400
+Subject: [PATCH] Adding file creation check
+
+(cherry picked from commit 7ffdf7ca11318ffee25bdced0afa04baeb3774f2)
+---
+ Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+index 11379eb272..c875640926 100644
+--- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
++++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+@@ -483,6 +483,7 @@ public partial class TrickplayManager : ITrickplayManager
+                 {
+                     _logger.LogDebug("Verifying write permission in media directory {OutputDir}", outputDir);
+                     Directory.CreateDirectory(outputDir.FullName);
++                    File.Create(Path.Combine(outputDir.FullName, ".jellyfin-trickplay"), 1, FileOptions.DeleteOnClose);
+                 }
+ 
+                 _logger.LogInformation("Creating trickplay files at {Width} width, for {Path} [ID: {ItemId}]", actualWidth, mediaPath, video.Id);

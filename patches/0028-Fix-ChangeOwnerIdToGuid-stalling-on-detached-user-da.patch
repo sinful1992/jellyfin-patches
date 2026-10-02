@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Tue, 15 Sep 2026 20:07:45 +0200
+Subject: [PATCH] Fix ChangeOwnerIdToGuid stalling on detached user data
+
+(cherry picked from commit 16123c5b0fa868f8cc98af2cfcb3876741eaed85)
+---
+ .../20260113203012_ChangeOwnerIdToGuid.cs       | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations/20260113203012_ChangeOwnerIdToGuid.cs b/src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations/20260113203012_ChangeOwnerIdToGuid.cs
+index 379da0e9be..1f336b6510 100644
+--- a/src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations/20260113203012_ChangeOwnerIdToGuid.cs
++++ b/src/Jellyfin.Database/Jellyfin.Database.Providers.Sqlite/Migrations/20260113203012_ChangeOwnerIdToGuid.cs
+@@ -33,12 +33,24 @@ namespace Jellyfin.Database.Providers.Sqlite.Migrations
+                 -- deletes an item: reattach it to the placeholder item instead of letting the
+                 -- FK_UserData_BaseItems_ItemId cascade wipe it. The placeholder can only hold one row
+                 -- per (UserId, CustomDataKey), so resolve collisions before repointing anything.
++                DROP TABLE IF EXISTS "DoomedUserDataKeys";
++                CREATE TEMPORARY TABLE "DoomedUserDataKeys" (
++                    "UserId" TEXT NOT NULL,
++                    "CustomDataKey" TEXT NOT NULL,
++                    PRIMARY KEY ("UserId", "CustomDataKey"));
++
++                -- Collect the colliding keys up front: correlating against "UserData" directly makes
++                -- the delete below re-scan every row of that user once per placeholder row.
++                INSERT OR IGNORE INTO "DoomedUserDataKeys" ("UserId", "CustomDataKey")
++                SELECT Doomed."UserId", Doomed."CustomDataKey"
++                FROM "UserData" AS Doomed
++                INNER JOIN "OrphanedBaseItemIds" AS Orphan ON Orphan."Id" = Doomed."ItemId";
++
+                 DELETE FROM "UserData"
+                 WHERE "ItemId" = '00000000-0000-0000-0000-000000000001'
+                   AND EXISTS (
+                       SELECT 1
+-                      FROM "UserData" AS Doomed
+-                      INNER JOIN "OrphanedBaseItemIds" AS Orphan ON Orphan."Id" = Doomed."ItemId"
++                      FROM "DoomedUserDataKeys" AS Doomed
+                       WHERE Doomed."UserId" = "UserData"."UserId"
+                         AND Doomed."CustomDataKey" = "UserData"."CustomDataKey");
+ 
+@@ -63,6 +75,7 @@ namespace Jellyfin.Database.Providers.Sqlite.Migrations
+ 
+                 DELETE FROM "BaseItems" WHERE "Id" IN (SELECT "Id" FROM "OrphanedBaseItemIds");
+ 
++                DROP TABLE "DoomedUserDataKeys";
+                 DROP TABLE "OrphanedBaseItemIds";
+                 """);
+ 

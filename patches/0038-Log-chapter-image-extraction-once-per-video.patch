@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jellyfrog <Jellyfrog@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 22:43:29 +0200
+Subject: [PATCH] Log chapter image extraction once per video
+
+(cherry picked from commit f2ee0ca08587656042ce5cf06a74a0bd50439844)
+---
+ Emby.Server.Implementations/Chapters/ChapterManager.cs | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/Emby.Server.Implementations/Chapters/ChapterManager.cs b/Emby.Server.Implementations/Chapters/ChapterManager.cs
+index 6379724848..750075e549 100644
+--- a/Emby.Server.Implementations/Chapters/ChapterManager.cs
++++ b/Emby.Server.Implementations/Chapters/ChapterManager.cs
+@@ -138,6 +138,7 @@ public class ChapterManager : IChapterManager
+ 
+         var success = true;
+         var changesMade = false;
++        var extractedCount = 0;
+ 
+         var runtimeTicks = video.RunTimeTicks ?? 0;
+ 
+@@ -179,7 +180,7 @@ public class ChapterManager : IChapterManager
+                             Protocol = video.PathProtocol ?? MediaProtocol.File,
+                         };
+ 
+-                        _logger.LogInformation("Extracting chapter image for {Name} at {Path}", video.Name, inputPath);
++                        _logger.LogDebug("Extracting chapter image for {Name} at {Time}", video.Name, time);
+                         var tempFile = await _encoder.ExtractVideoImage(inputPath, container, mediaSource, video.GetDefaultVideoStream(), video.Video3DFormat, time, cancellationToken).ConfigureAwait(false);
+                         File.Copy(tempFile, path, true);
+ 
+@@ -195,6 +196,7 @@ public class ChapterManager : IChapterManager
+                         chapter.ImagePath = path;
+                         chapter.ImageDateModified = _fileSystem.GetLastWriteTimeUtc(path);
+                         changesMade = true;
++                        extractedCount++;
+                     }
+                     catch (Exception ex)
+                     {
+@@ -223,6 +225,11 @@ public class ChapterManager : IChapterManager
+             }
+         }
+ 
++        if (extractedCount > 0)
++        {
++            _logger.LogInformation("Extracted {Count} chapter images for {Name} at {Path}", extractedCount, video.Name, video.Path);
++        }
++
+         if (saveChapters && changesMade)
+         {
+             SaveChapters(video, chapters);

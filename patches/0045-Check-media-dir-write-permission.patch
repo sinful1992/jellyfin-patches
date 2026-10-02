@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TheDreadPirate <solidsnake1298@gmail.com>
+Date: Mon, 21 Sep 2026 15:05:09 -0400
+Subject: [PATCH] Check media dir write permission
+
+(cherry picked from commit ea0a7527bc7be35a6289abc61beef18a6afb50c1)
+---
+ .../Trickplay/TrickplayManager.cs                          | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+index f5c71ec7c0..11379eb272 100644
+--- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
++++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+@@ -478,6 +478,13 @@ public partial class TrickplayManager : ITrickplayManager
+                 var mediaStream = mediaSource.VideoStream;
+                 var container = mediaSource.Container;
+ 
++                // Checks for write permission before generating images
++                if (saveWithMedia)
++                {
++                    _logger.LogDebug("Verifying write permission in media directory {OutputDir}", outputDir);
++                    Directory.CreateDirectory(outputDir.FullName);
++                }
++
+                 _logger.LogInformation("Creating trickplay files at {Width} width, for {Path} [ID: {ItemId}]", actualWidth, mediaPath, video.Id);
+                 imgTempDir = await _mediaEncoder.ExtractVideoImagesOnIntervalAccelerated(
+                     mediaPath,

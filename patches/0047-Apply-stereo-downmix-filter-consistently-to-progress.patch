@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Fri, 25 Sep 2026 09:39:51 +0200
+Subject: [PATCH] Apply stereo downmix filter consistently to progressive audio
+ transcodes
+
+(cherry picked from commit ba256d15dc46439e359237830cc1dd0c512bd3bd)
+---
+ .../MediaEncoding/EncodingHelper.cs           | 11 +++-
+ .../MediaEncoding/EncodingHelperTests.cs      | 60 +++++++++++++++++++
+ 2 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+index aef51a8070..99db223b6b 100644
+--- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
++++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+@@ -7848,7 +7848,9 @@ namespace MediaBrowser.Controller.MediaEncoding
+ 
+             var channels = state.OutputAudioChannels;
+ 
+-            var useDownMixAlgorithm = state.AudioStream is not null
++            // Must match the condition under which GetAudioFilterParam emits the downmix filter.
++            var useDownMixAlgorithm = channels == 2
++                                      && state.AudioStream?.Channels > 2
+                                       && DownMixAlgorithmsHelper.AlgorithmFilterStrings.ContainsKey((encodingOptions.DownMixStereoAlgorithm, DownMixAlgorithmsHelper.InferChannelLayout(state.AudioStream)));
+ 
+             if (channels.HasValue && !useDownMixAlgorithm)
+@@ -7943,6 +7945,13 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 audioTranscodeParams.Add("-ar " + sampleRateValue.ToString(CultureInfo.InvariantCulture));
+             }
+ 
++            // Without the downmix filter, -ac 2 alone drops the LFE channel.
++            var audioFilterParam = GetAudioFilterParam(state, encodingOptions);
++            if (!string.IsNullOrEmpty(audioFilterParam))
++            {
++                audioTranscodeParams.Add(audioFilterParam.TrimStart());
++            }
++
+             // Copy the movflags from GetProgressiveVideoFullCommandLine
+             // See #9248 and the associated PR for why this is needed
+             if (_mp4ContainerNames.Contains(state.OutputContainer))
+diff --git a/tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperTests.cs b/tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperTests.cs
+index 2b009b4673..aca55fbcc1 100644
+--- a/tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperTests.cs
++++ b/tests/Jellyfin.Controller.Tests/MediaEncoding/EncodingHelperTests.cs
+@@ -261,6 +261,66 @@ public class EncodingHelperTests
+         Assert.Contains("-ar 48000", args, StringComparison.Ordinal);
+     }
+ 
++    [Fact]
++    public void GetProgressiveAudioFullCommandLine_StereoDownmix_AppliesDownMixAlgorithm()
++    {
++        // Issue #18194: -ac 2 alone drops the LFE channel, the configured downmix filter must be applied.
++        var state = BuildAudioState("aac", 48000);
++        state.AudioStream.Channels = 6;
++        state.AudioStream.ChannelLayout = "5.1";
++        state.OutputAudioChannels = 2;
++        var options = new EncodingOptions { DownMixStereoAlgorithm = DownMixStereoAlgorithms.Dave750, DownMixAudioBoost = 1 };
++        var args = CreateHelper().GetProgressiveAudioFullCommandLine(state, options, "/tmp/out");
++
++        Assert.Contains(
++            "-af \"" + DownMixAlgorithmsHelper.AlgorithmFilterStrings[(DownMixStereoAlgorithms.Dave750, "5.1")] + "\"",
++            args,
++            StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public void GetProgressiveAudioFullCommandLine_NoDownmix_EmitsNoAudioFilter()
++    {
++        var state = BuildAudioState("aac", 48000);
++        state.AudioStream.Channels = 2;
++        state.OutputAudioChannels = 2;
++        var options = new EncodingOptions { DownMixStereoAlgorithm = DownMixStereoAlgorithms.Dave750 };
++        var args = CreateHelper().GetProgressiveAudioFullCommandLine(state, options, "/tmp/out");
++
++        Assert.DoesNotContain("-af", args, StringComparison.Ordinal);
++    }
++
++    [Theory]
++    [InlineData(1)]
++    [InlineData(6)]
++    public void GetProgressiveVideoAudioArguments_NonStereoOutput_KeepsChannelCount(int outputChannels)
++    {
++        // The downmix filter only applies to stereo output, so -ac must not be dropped otherwise.
++        var state = BuildAudioState("aac", 48000);
++        state.AudioStream.Channels = 6;
++        state.AudioStream.ChannelLayout = "5.1";
++        state.OutputAudioChannels = outputChannels;
++        var options = new EncodingOptions { DownMixStereoAlgorithm = DownMixStereoAlgorithms.Dave750 };
++        var args = CreateHelper().GetProgressiveVideoAudioArguments(state, options);
++
++        Assert.Contains("-ac " + outputChannels, args, StringComparison.Ordinal);
++        Assert.DoesNotContain("pan=", args, StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public void GetProgressiveVideoAudioArguments_StereoDownmix_UsesFilterInsteadOfChannelCount()
++    {
++        var state = BuildAudioState("aac", 48000);
++        state.AudioStream.Channels = 6;
++        state.AudioStream.ChannelLayout = "5.1";
++        state.OutputAudioChannels = 2;
++        var options = new EncodingOptions { DownMixStereoAlgorithm = DownMixStereoAlgorithms.Dave750 };
++        var args = CreateHelper().GetProgressiveVideoAudioArguments(state, options);
++
++        Assert.DoesNotContain("-ac ", args, StringComparison.Ordinal);
++        Assert.Contains("pan=stereo", args, StringComparison.Ordinal);
++    }
++
+     private static EncodingJobInfo BuildAudioState(string audioCodec, int requestedSampleRate, string? outputContainer = null)
+     {
+         var audio = new MediaStream { Index = 0, Type = MediaStreamType.Audio, Codec = "flac", SampleRate = 96000 };

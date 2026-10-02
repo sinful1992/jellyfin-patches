@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Tue, 15 Sep 2026 11:31:38 +0200
+Subject: [PATCH] Fix test concurrency
+
+(cherry picked from commit edab0162228957d300673c80eec94e93b2af17dc)
+---
+ .../Entities/BaseItemTests.cs                         |  7 +++++++
+ .../Entities/PlaylistTests.cs                         | 11 +++++++++--
+ 2 files changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/tests/Jellyfin.Controller.Tests/Entities/BaseItemTests.cs b/tests/Jellyfin.Controller.Tests/Entities/BaseItemTests.cs
+index e072bccb82..c67717e2fa 100644
+--- a/tests/Jellyfin.Controller.Tests/Entities/BaseItemTests.cs
++++ b/tests/Jellyfin.Controller.Tests/Entities/BaseItemTests.cs
+@@ -40,15 +40,21 @@ public class BaseItemTests
+         var previousLibrary = BaseItem.LibraryManager;
+         var previousRepository = BaseItem.ItemRepository;
+         var previousLogger = BaseItem.Logger;
++        var previousMediaSourceManager = BaseItem.MediaSourceManager;
+         var library = new Mock<ILibraryManager>(MockBehavior.Strict);
+         var repository = new Mock<MediaBrowser.Controller.Persistence.IItemRepository>(MockBehavior.Strict);
+         var directory = new Mock<IDirectoryService>();
+         directory.Setup(d => d.IsAccessible(It.IsAny<string>())).Returns(true);
++
++        // IsLibraryFolderAccessible reads FileNameWithoutExtension, which resolves the path protocol
++        var mediaSourceManager = new Mock<IMediaSourceManager>();
++        mediaSourceManager.Setup(x => x.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
+         try
+         {
+             BaseItem.LibraryManager = library.Object;
+             BaseItem.ItemRepository = repository.Object;
+             BaseItem.Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger<BaseItem>.Instance;
++            BaseItem.MediaSourceManager = mediaSourceManager.Object;
+             var folder = new FailingEnumerationFolder(failAfterFirstChild, accessDenied)
+             {
+                 Id = Guid.NewGuid(),
+@@ -64,6 +70,7 @@ public class BaseItemTests
+             BaseItem.LibraryManager = previousLibrary;
+             BaseItem.ItemRepository = previousRepository;
+             BaseItem.Logger = previousLogger;
++            BaseItem.MediaSourceManager = previousMediaSourceManager;
+         }
+     }
+ 
+diff --git a/tests/Jellyfin.Controller.Tests/Entities/PlaylistTests.cs b/tests/Jellyfin.Controller.Tests/Entities/PlaylistTests.cs
+index 70da5eafe5..1794469359 100644
+--- a/tests/Jellyfin.Controller.Tests/Entities/PlaylistTests.cs
++++ b/tests/Jellyfin.Controller.Tests/Entities/PlaylistTests.cs
+@@ -9,14 +9,21 @@ using MediaBrowser.Controller.Entities.Audio;
+ using MediaBrowser.Controller.Entities.Movies;
+ using MediaBrowser.Controller.Library;
+ using MediaBrowser.Controller.Playlists;
+-using MediaBrowser.Model.Querying;
+ using Moq;
+ using Xunit;
+ 
+ namespace Jellyfin.Controller.Tests.Entities;
+ 
+-public class PlaylistTests
++[Collection("LibraryManagerTests")]
++public sealed class PlaylistTests : IDisposable
+ {
++    private readonly ILibraryManager? _previousLibraryManager = BaseItem.LibraryManager;
++
++    public void Dispose()
++    {
++        BaseItem.LibraryManager = _previousLibraryManager;
++    }
++
+     [Fact]
+     public void IsVisible_PlaylistWithNothingLeftInIt_IsHidden()
+     {

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Tue, 15 Sep 2026 15:02:28 +0200
+Subject: [PATCH] Don't let a failed shutdown cancel an in-process restart
+
+(cherry picked from commit ee8e51a268dd497238540a4d3a06f13d360746d5)
+---
+ Jellyfin.Server/Program.cs | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/Jellyfin.Server/Program.cs b/Jellyfin.Server/Program.cs
+index 715fc3d3b9..29c7d512d0 100644
+--- a/Jellyfin.Server/Program.cs
++++ b/Jellyfin.Server/Program.cs
+@@ -149,8 +149,16 @@ namespace Jellyfin.Server
+                 if (_restartOnShutdown)
+                 {
+                     _startTimestamp = Stopwatch.GetTimestamp();
+-                    await _setupServer.StopAsync().ConfigureAwait(false);
+-                    await _setupServer.RunAsync().ConfigureAwait(false);
++                    try
++                    {
++                        await _setupServer.StopAsync().ConfigureAwait(false);
++                        await _setupServer.RunAsync().ConfigureAwait(false);
++                    }
++                    catch (Exception ex)
++                    {
++                        // The startup page is optional, losing it must not take the restart down with it.
++                        _logger.LogError(ex, "Failed to bring the startup server back up");
++                    }
+                 }
+             } while (_restartOnShutdown);
+ 
+@@ -245,7 +253,15 @@ namespace Jellyfin.Server
+                     await appHost.RunStartupTasksAsync().ConfigureAwait(false);
+                     _logger.LogInformation("Startup complete {Time:g}", Stopwatch.GetElapsedTime(_startTimestamp));
+ 
+-                    await _jellyfinHost.WaitForShutdownAsync().ConfigureAwait(false);
++                    try
++                    {
++                        await _jellyfinHost.WaitForShutdownAsync().ConfigureAwait(false);
++                    }
++                    catch (Exception ex)
++                    {
++                        // A hosted service that throws or times out while stopping must not cancel a pending restart.
++                        _logger.LogError(ex, "Failure while stopping the server");
++                    }
+                 }
+ 
+                 _restartOnShutdown = appHost.ShouldRestart;

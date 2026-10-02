@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: TheDreadPirate <solidsnake1298@gmail.com>
+Date: Fri, 25 Sep 2026 08:45:52 -0400
+Subject: [PATCH] Responding to feedback, switching to FileHelper
+
+(cherry picked from commit afadb086ca1ef40086e6b8363b2051c7d7fc9d49)
+---
+ Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+index c875640926..dd788cc857 100644
+--- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
++++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
+@@ -11,6 +11,7 @@ using AsyncKeyedLock;
+ using J2N.Collections.Generic.Extensions;
+ using Jellyfin.Database.Implementations;
+ using Jellyfin.Database.Implementations.Entities;
++using Jellyfin.Extensions;
+ using MediaBrowser.Common.Configuration;
+ using MediaBrowser.Controller.Configuration;
+ using MediaBrowser.Controller.Drawing;
+@@ -483,7 +484,7 @@ public partial class TrickplayManager : ITrickplayManager
+                 {
+                     _logger.LogDebug("Verifying write permission in media directory {OutputDir}", outputDir);
+                     Directory.CreateDirectory(outputDir.FullName);
+-                    File.Create(Path.Combine(outputDir.FullName, ".jellyfin-trickplay"), 1, FileOptions.DeleteOnClose);
++                    FileHelper.CreateEmpty(Path.Combine(outputDir.FullName, ".jellyfin-trickplay"));
+                 }
+ 
+                 _logger.LogInformation("Creating trickplay files at {Width} width, for {Path} [ID: {ItemId}]", actualWidth, mediaPath, video.Id);

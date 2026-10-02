@@ -3,6 +3,14 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p6 — 2026-10-02
+
+Base `v12.1` · image `jellyfin-patched:12.1-p6`
+
+Base image moved to LinuxServer `12.1ubu2604-ls51` (jellyfin-ffmpeg8 8.1.3-1, libsqlite3-0 security update),
+plus the 28 functional `release-12.z` backports p5 did not carry (cherry-picked `-x`, so port-check drops them
+at 12.1.1). USER chose this scope ("B", team task 5 #174). Triage: team repo `jellyfin/server/upstream.md`.
+
 ## 12.1-p5 — 2026-10-01
 
 Base `v12.1` · image `jellyfin-patched:12.1-p5`

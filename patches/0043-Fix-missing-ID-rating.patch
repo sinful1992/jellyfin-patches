@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shadowghost <Ghost_of_Stone@web.de>
+Date: Sun, 20 Sep 2026 14:11:09 +0200
+Subject: [PATCH] Fix missing ID rating
+
+(cherry picked from commit 01511328c7f6aca8b2fb093bc502dbea0a30ccac)
+---
+ .../Localization/Ratings/0-prefer.json        |  2 +-
+ .../Localization/Ratings/id.json              | 25 +++++++++++++++++--
+ .../Localization/LocalizationManagerTests.cs  | 11 ++++++++
+ 3 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/Emby.Server.Implementations/Localization/Ratings/0-prefer.json b/Emby.Server.Implementations/Localization/Ratings/0-prefer.json
+index b390151611..dd88b35363 100644
+--- a/Emby.Server.Implementations/Localization/Ratings/0-prefer.json
++++ b/Emby.Server.Implementations/Localization/Ratings/0-prefer.json
+@@ -24,7 +24,7 @@
+             }
+         },
+         {
+-            "ratingStrings": ["X", "XX", "XXX", "XXXX"],
++            "ratingStrings": ["X", "XX", "XXX", "XXXX", "P"],
+             "ratingScore": {
+                 "score": 1000,
+                 "subScore": null
+diff --git a/Emby.Server.Implementations/Localization/Ratings/id.json b/Emby.Server.Implementations/Localization/Ratings/id.json
+index 8c687c2320..f55e4e4333 100644
+--- a/Emby.Server.Implementations/Localization/Ratings/id.json
++++ b/Emby.Server.Implementations/Localization/Ratings/id.json
+@@ -3,14 +3,28 @@
+     "supportsSubScores": false,
+     "ratings": [
+         {
+-            "ratingStrings": ["SU"],
++            "ratingStrings": ["SU", "SU-BO", "Semua Umur"],
+             "ratingScore": {
+                 "score": 0,
+                 "subScore": null
+             }
+         },
+         {
+-            "ratingStrings": ["13+"],
++            "ratingStrings": ["P", "P2+", "P-BO", "Prasekolah"],
++            "ratingScore": {
++                "score": 2,
++                "subScore": null
++            }
++        },
++        {
++            "ratingStrings": ["A", "A7+", "A-BO", "Anak"],
++            "ratingScore": {
++                "score": 7,
++                "subScore": null
++            }
++        },
++        {
++            "ratingStrings": ["13+", "R", "R13+", "R-BO", "Remaja"],
+             "ratingScore": {
+                 "score": 13,
+                 "subScore": null
+@@ -23,6 +37,13 @@
+                 "subScore": null
+             }
+         },
++        {
++            "ratingStrings": ["D", "D18+", "Dewasa"],
++            "ratingScore": {
++                "score": 18,
++                "subScore": null
++            }
++        },
+         {
+             "ratingStrings": ["21+"],
+             "ratingScore": {
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Localization/LocalizationManagerTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Localization/LocalizationManagerTests.cs
+index 402e042b57..4e57f32b57 100644
+--- a/tests/Jellyfin.Server.Implementations.Tests/Localization/LocalizationManagerTests.cs
++++ b/tests/Jellyfin.Server.Implementations.Tests/Localization/LocalizationManagerTests.cs
+@@ -230,6 +230,17 @@ namespace Jellyfin.Server.Implementations.Tests.Localization
+         [InlineData("–12", "FR", 12, null)] // The CNC writes its minimum ages with an en dash
+         [InlineData("–16", "FR", 16, null)]
+         [InlineData("–18", "FR", 18, null)]
++        [InlineData("SU", "ID", 0, null)] // Indonesian broadcast classifications (KPI)
++        [InlineData("P", "ID", 2, null)]
++        [InlineData("A", "ID", 7, null)]
++        [InlineData("R", "ID", 13, null)]
++        [InlineData("D", "ID", 18, null)]
++        [InlineData("D18+", "ID", 18, null)] // Written with the minimum age, as broadcast since 2016
++        [InlineData("R-BO", "ID", 13, null)] // Parental guidance does not change the age group
++        [InlineData("Dewasa", "ID", 18, null)]
++        [InlineData("ID-D", "ID", 18, null)] // TMDB style country prefix
++        [InlineData("ID-D", "US", 18, null)] // Country prefix resolved via the separator fallback
++        [InlineData("P", "US", 1000, null)] // Ambiguous outside Indonesia, preferred as the Portuguese "Pornográfico"
+         public async Task GetRatingLevel_GivenValidString_Success(string value, string countryCode, int? expectedScore, int? expectedSubScore)
+         {
+             var localizationManager = Setup(new ServerConfiguration()
