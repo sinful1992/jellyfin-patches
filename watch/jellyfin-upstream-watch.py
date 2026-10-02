@@ -497,8 +497,6 @@ def check_port(state, findings):
         tag = state.get(key)
         if tag and tag != PINNED:
             targets.append("v" + tag)
-    if not targets:
-        return
 
     r = _run(["git", "fetch", "--tags", "--quiet", "origin"], cwd=SRC_DIR)
     if r.returncode != 0:
@@ -519,9 +517,10 @@ def check_port(state, findings):
         anc = _run(["git", "merge-base", "--is-ancestor", tag, "v" + PINNED], cwd=SRC_DIR)
         if anc.returncode != 0:
             forward.append(tag)
-    targets = forward
-    if not targets:
-        return
+    # The next patch release is cut from release-12.z, so between tags that branch is
+    # what the series will actually meet. Without it the report froze at the last tag
+    # (2026-10-02 it still said "patched/12.0 -> v12.1" while we ran patched/12.1).
+    targets = forward + [f"origin/release-{PINNED.split('.')[0]}.z"]
 
     r = _run([sys.executable, str(PORT_CHECK), "--src-dir", str(SRC_DIR),
               "--base-tag", "v" + PINNED, "--series", SERIES, *targets], timeout=900)
@@ -593,12 +592,15 @@ def main():
     state["last_error"] = errors or None
     save_state(state)
 
+    # One line per run, so run.log says which days posted (it used to log only "no
+    # changes", leaving posting days blank). Findings carry no secrets.
+    print(f"{state['last_run']} findings={len(findings)} errors={len(errors)}")
+    for line in errors + findings:
+        print("  " + line.replace("\n", "\n  "))
     if errors:
         post(":warning: **jellyfin-watch check failed**\n" + "\n".join(f"- {e}" for e in errors))
     if findings:
         post(":eyes: **Upstream Jellyfin changes affecting our patches**\n\n" + "\n\n".join(findings))
-    elif not errors:
-        print("no changes")
     return 1 if errors else 0
 
 
