@@ -3,6 +3,19 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p7 — 2026-10-03
+
+**Images: quality 80 by default, and the sizes clients ask for are pre-rendered.** A resize request with no
+`quality` used to encode at 100 (a 300 px poster ~113 KB vs ~28 KB at 80). Requests without a resize still get the
+original file. The served resize shapes are counted (`data/image-shapes.json`), and the daily 03:30 "Pre-render
+images" task renders the most-requested ones for items added in the last 7 days, so the first view is a cache hit.
+
+**Binge-ahead (team task 8, S1).** For a device that has to transcode an episode for video reasons only (the Fire TV
+on HEVC Main 10), the daily 04:00 "Binge-ahead" task prepares an H.264 copy of the next 2 unplayed episodes of that
+series (`cache/prepared/`, at most 4, deleted once played or after 14 days). That client's PlaybackInfo for the
+episode then answers direct play of the prepared file under the original source id, and its stream request is
+served from it. New replaced assemblies: `MediaBrowser.Controller`, `Emby.Server.Implementations`, `Jellyfin.Api`.
+
 ## 12.1-p6 — 2026-10-02
 
 Base `v12.1` · image `jellyfin-patched:12.1-p6`

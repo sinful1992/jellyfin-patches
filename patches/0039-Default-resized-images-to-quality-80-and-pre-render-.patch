@@ -1,0 +1,752 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sat, 3 Oct 2026 00:13:29 +0100
+Subject: [PATCH] Default resized images to quality 80 and pre-render the
+ shapes clients ask for
+
+A client that sends maxWidth/maxHeight but no quality got quality 100: a
+300 px poster was ~113 KB against ~28 KB at 80 with no visible difference
+on a TV. Requests without any resize keep 100, so the original file is
+still served untouched.
+
+The first request for each size costs a 130-280 ms resize on a slow CPU.
+The image cache key holds the exact maxWidth and output format, so a fixed
+list of sizes can't be guessed: ImageShapeTracker counts the resize shapes
+actually served (persisted to data/image-shapes.json, capped at 256), and
+the daily "Pre-render images" task renders the top shapes for items added
+in the last 7 days, then halves the counts so old layouts fade out.
+---
+ .../ApplicationHost.cs                        |   2 +
+ .../Images/ImageShapeTracker.cs               | 131 +++++++++++++++
+ .../Tasks/ImagePrerenderTask.cs               | 146 +++++++++++++++++
+ Jellyfin.Api/Controllers/ImageController.cs   |  54 ++++++-
+ .../Drawing/IImageShapeTracker.cs             |  34 ++++
+ MediaBrowser.Controller/Drawing/ImageShape.cs |  70 ++++++++
+ .../Controllers/ImageControllerTests.cs       |  13 ++
+ .../Images/ImageShapeTrackerTests.cs          | 152 ++++++++++++++++++
+ 8 files changed, 600 insertions(+), 2 deletions(-)
+ create mode 100644 Emby.Server.Implementations/Images/ImageShapeTracker.cs
+ create mode 100644 Emby.Server.Implementations/ScheduledTasks/Tasks/ImagePrerenderTask.cs
+ create mode 100644 MediaBrowser.Controller/Drawing/IImageShapeTracker.cs
+ create mode 100644 MediaBrowser.Controller/Drawing/ImageShape.cs
+ create mode 100644 tests/Jellyfin.Server.Implementations.Tests/Images/ImageShapeTrackerTests.cs
+
+diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
+index d4be59f641..b35f1cb821 100644
+--- a/Emby.Server.Implementations/ApplicationHost.cs
++++ b/Emby.Server.Implementations/ApplicationHost.cs
+@@ -24,6 +24,7 @@ using Emby.Server.Implementations.Data;
+ using Emby.Server.Implementations.Devices;
+ using Emby.Server.Implementations.Dto;
+ using Emby.Server.Implementations.HttpServer.Security;
++using Emby.Server.Implementations.Images;
+ using Emby.Server.Implementations.IO;
+ using Emby.Server.Implementations.Library;
+ using Emby.Server.Implementations.Library.Search;
+@@ -593,6 +594,7 @@ namespace Emby.Server.Implementations
+             serviceCollection.AddSingleton<IWebSocketManager, WebSocketManager>();
+ 
+             serviceCollection.AddSingleton<IImageProcessor, ImageProcessor>();
++            serviceCollection.AddSingleton<IImageShapeTracker, ImageShapeTracker>();
+ 
+             serviceCollection.AddSingleton<ITVSeriesManager, TVSeriesManager>();
+ 
+diff --git a/Emby.Server.Implementations/Images/ImageShapeTracker.cs b/Emby.Server.Implementations/Images/ImageShapeTracker.cs
+new file mode 100644
+index 0000000000..8afd1b03a2
+--- /dev/null
++++ b/Emby.Server.Implementations/Images/ImageShapeTracker.cs
+@@ -0,0 +1,131 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++using System.Threading;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller.Drawing;
++using Microsoft.Extensions.Logging;
++
++namespace Emby.Server.Implementations.Images;
++
++/// <summary>
++/// In-memory counts of requested image shapes, persisted to <c>image-shapes.json</c> in the data folder.
++/// </summary>
++public sealed class ImageShapeTracker : IImageShapeTracker
++{
++    /// <summary>
++    /// The most distinct shapes kept. A misbehaving client sending random sizes can't grow this without bound.
++    /// </summary>
++    public const int MaxShapes = 256;
++
++    /// <summary>
++    /// The counts are written to disk after this many recorded requests.
++    /// </summary>
++    public const int SaveEvery = 200;
++
++    private readonly ConcurrentDictionary<ImageShape, int> _counts = new();
++    private readonly string _path;
++    private readonly ILogger<ImageShapeTracker> _logger;
++    private readonly object _saveLock = new();
++    private int _sinceSave;
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="ImageShapeTracker"/> class.
++    /// </summary>
++    /// <param name="appPaths">The application paths.</param>
++    /// <param name="logger">The logger.</param>
++    public ImageShapeTracker(IApplicationPaths appPaths, ILogger<ImageShapeTracker> logger)
++    {
++        _path = Path.Combine(appPaths.DataPath, "image-shapes.json");
++        _logger = logger;
++        Load();
++    }
++
++    /// <inheritdoc />
++    public void Record(ImageShape shape)
++    {
++        if (_counts.Count >= MaxShapes && !_counts.ContainsKey(shape))
++        {
++            return;
++        }
++
++        _counts.AddOrUpdate(shape, 1, (_, count) => count + 1);
++
++        // Saved every SaveEvery records as well as after each pre-render run, so a restart loses little.
++        if (Interlocked.Increment(ref _sinceSave) % SaveEvery == 0)
++        {
++            Save();
++        }
++    }
++
++    /// <inheritdoc />
++    public IReadOnlyList<ImageShape> GetTopShapes(int minCount, int limit)
++        => _counts
++            .Where(kv => kv.Value >= minCount)
++            .OrderByDescending(kv => kv.Value)
++            .Take(limit)
++            .Select(kv => kv.Key)
++            .ToList();
++
++    /// <inheritdoc />
++    public void Decay()
++    {
++        foreach (var (shape, count) in _counts)
++        {
++            var halved = count / 2;
++            if (halved == 0)
++            {
++                _counts.TryRemove(shape, out _);
++            }
++            else
++            {
++                _counts[shape] = halved;
++            }
++        }
++    }
++
++    /// <inheritdoc />
++    public void Save()
++    {
++        var entries = _counts.Select(kv => new Entry(kv.Key, kv.Value)).ToList();
++        lock (_saveLock)
++        {
++            try
++            {
++                var tmp = _path + ".tmp";
++                File.WriteAllText(tmp, JsonSerializer.Serialize(entries));
++                File.Move(tmp, _path, true);
++            }
++            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++            {
++                _logger.LogWarning(ex, "Could not save image shapes to {Path}", _path);
++            }
++        }
++    }
++
++    private void Load()
++    {
++        if (!File.Exists(_path))
++        {
++            return;
++        }
++
++        try
++        {
++            var entries = JsonSerializer.Deserialize<List<Entry>>(File.ReadAllText(_path)) ?? [];
++            foreach (var entry in entries.Take(MaxShapes))
++            {
++                _counts[entry.Shape] = entry.Count;
++            }
++        }
++        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
++        {
++            _logger.LogWarning(ex, "Ignoring unreadable image shapes file {Path}", _path);
++        }
++    }
++
++    private sealed record Entry(ImageShape Shape, int Count);
++}
+diff --git a/Emby.Server.Implementations/ScheduledTasks/Tasks/ImagePrerenderTask.cs b/Emby.Server.Implementations/ScheduledTasks/Tasks/ImagePrerenderTask.cs
+new file mode 100644
+index 0000000000..d942c97279
+--- /dev/null
++++ b/Emby.Server.Implementations/ScheduledTasks/Tasks/ImagePrerenderTask.cs
+@@ -0,0 +1,146 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using System.Threading;
++using System.Threading.Tasks;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Controller.Drawing;
++using MediaBrowser.Controller.Dto;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Model.Tasks;
++using Microsoft.Extensions.Logging;
++
++namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
++
++/// <summary>
++/// Renders the image sizes clients actually ask for, for recently added items, so the first
++/// look at a new poster is a cache hit instead of a resize on the request path.
++/// </summary>
++public class ImagePrerenderTask : IScheduledTask
++{
++    /// <summary>
++    /// A shape must have been requested at least this often to be pre-rendered.
++    /// </summary>
++    public const int MinShapeCount = 3;
++
++    /// <summary>
++    /// The most shapes pre-rendered per run.
++    /// </summary>
++    public const int MaxShapes = 32;
++
++    /// <summary>
++    /// Items added within this window are pre-rendered.
++    /// </summary>
++    public static readonly TimeSpan RecentWindow = TimeSpan.FromDays(7);
++
++    private readonly ILibraryManager _libraryManager;
++    private readonly IImageProcessor _imageProcessor;
++    private readonly IImageShapeTracker _shapeTracker;
++    private readonly ILogger<ImagePrerenderTask> _logger;
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="ImagePrerenderTask"/> class.
++    /// </summary>
++    /// <param name="libraryManager">The library manager.</param>
++    /// <param name="imageProcessor">The image processor.</param>
++    /// <param name="shapeTracker">The image shape tracker.</param>
++    /// <param name="logger">The logger.</param>
++    public ImagePrerenderTask(
++        ILibraryManager libraryManager,
++        IImageProcessor imageProcessor,
++        IImageShapeTracker shapeTracker,
++        ILogger<ImagePrerenderTask> logger)
++    {
++        _libraryManager = libraryManager;
++        _imageProcessor = imageProcessor;
++        _shapeTracker = shapeTracker;
++        _logger = logger;
++    }
++
++    /// <inheritdoc />
++    public string Name => "Pre-render images";
++
++    /// <inheritdoc />
++    public string Description => "Renders the image sizes clients request most, for items added in the last 7 days.";
++
++    /// <inheritdoc />
++    public string Category => "Library";
++
++    /// <inheritdoc />
++    public string Key => "PrerenderImages";
++
++    /// <summary>
++    /// Groups the shapes by the item kind they apply to.
++    /// </summary>
++    /// <param name="shapes">The shapes, most requested first.</param>
++    /// <returns>The shapes per item kind, in the same order.</returns>
++    public static IReadOnlyDictionary<BaseItemKind, ImageShape[]> PlanByKind(IEnumerable<ImageShape> shapes)
++        => shapes
++            .GroupBy(s => s.ItemKind)
++            .ToDictionary(g => g.Key, g => g.ToArray());
++
++    /// <inheritdoc />
++    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
++    {
++        var plan = PlanByKind(_shapeTracker.GetTopShapes(MinShapeCount, MaxShapes));
++        if (plan.Count == 0)
++        {
++            _logger.LogInformation("No image shapes requested often enough yet; nothing to pre-render");
++            progress.Report(100);
++            return;
++        }
++
++        var items = _libraryManager.GetItemList(new InternalItemsQuery
++        {
++            IncludeItemTypes = plan.Keys.ToArray(),
++            MinDateCreated = DateTime.UtcNow - RecentWindow,
++            IsVirtualItem = false,
++            Recursive = true,
++            DtoOptions = new DtoOptions(false) { EnableImages = true }
++        });
++
++        int rendered = 0;
++        for (var i = 0; i < items.Count; i++)
++        {
++            cancellationToken.ThrowIfCancellationRequested();
++            var item = items[i];
++            foreach (var shape in plan[item.GetBaseItemKind()])
++            {
++                var image = item.GetImageInfo(shape.ImageType, 0);
++                if (image is null || !image.IsLocalFile)
++                {
++                    continue;
++                }
++
++                try
++                {
++                    // ProcessImage returns the cached file when it already exists, so re-runs are cheap.
++                    await _imageProcessor.ProcessImage(shape.ToOptions(item, image)).ConfigureAwait(false);
++                    rendered++;
++                }
++                catch (Exception ex)
++                {
++                    _logger.LogDebug(ex, "Pre-render of {ImageType} for {Item} failed", shape.ImageType, item.Name);
++                }
++            }
++
++            progress.Report(100d * (i + 1) / items.Count);
++        }
++
++        _logger.LogInformation("Pre-rendered {Count} images for {Items} recent items", rendered, items.Count);
++        _shapeTracker.Decay();
++        _shapeTracker.Save();
++    }
++
++    /// <inheritdoc />
++    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
++    {
++        yield return new TaskTriggerInfo
++        {
++            Type = TaskTriggerInfoType.DailyTrigger,
++            TimeOfDayTicks = new TimeSpan(3, 30, 0).Ticks,
++            MaxRuntimeTicks = TimeSpan.FromHours(2).Ticks
++        };
++    }
++}
+diff --git a/Jellyfin.Api/Controllers/ImageController.cs b/Jellyfin.Api/Controllers/ImageController.cs
+index d492a2f5ba..ae190c3f37 100644
+--- a/Jellyfin.Api/Controllers/ImageController.cs
++++ b/Jellyfin.Api/Controllers/ImageController.cs
+@@ -42,6 +42,11 @@ namespace Jellyfin.Api.Controllers;
+ [Route("")]
+ public class ImageController : BaseJellyfinApiController
+ {
++    /// <summary>
++    /// The quality used for a resized image when the request names none.
++    /// </summary>
++    public const int DefaultResizeQuality = 80;
++
+     private readonly IUserManager _userManager;
+     private readonly ILibraryManager _libraryManager;
+     private readonly IProviderManager _providerManager;
+@@ -50,6 +55,7 @@ public class ImageController : BaseJellyfinApiController
+     private readonly ILogger<ImageController> _logger;
+     private readonly IServerConfigurationManager _serverConfigurationManager;
+     private readonly IApplicationPaths _appPaths;
++    private readonly IImageShapeTracker _imageShapeTracker;
+ 
+     /// <summary>
+     /// Initializes a new instance of the <see cref="ImageController"/> class.
+@@ -62,6 +68,7 @@ public class ImageController : BaseJellyfinApiController
+     /// <param name="logger">Instance of the <see cref="ILogger{ImageController}"/> interface.</param>
+     /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
+     /// <param name="appPaths">Instance of the <see cref="IApplicationPaths"/> interface.</param>
++    /// <param name="imageShapeTracker">Instance of the <see cref="IImageShapeTracker"/> interface.</param>
+     public ImageController(
+         IUserManager userManager,
+         ILibraryManager libraryManager,
+@@ -70,7 +77,8 @@ public class ImageController : BaseJellyfinApiController
+         IFileSystem fileSystem,
+         ILogger<ImageController> logger,
+         IServerConfigurationManager serverConfigurationManager,
+-        IApplicationPaths appPaths)
++        IApplicationPaths appPaths,
++        IImageShapeTracker imageShapeTracker)
+     {
+         _userManager = userManager;
+         _libraryManager = libraryManager;
+@@ -80,6 +88,7 @@ public class ImageController : BaseJellyfinApiController
+         _logger = logger;
+         _serverConfigurationManager = serverConfigurationManager;
+         _appPaths = appPaths;
++        _imageShapeTracker = imageShapeTracker;
+     }
+ 
+     private static CryptoStream GetFromBase64Stream(Stream inputStream)
+@@ -1907,7 +1916,7 @@ public class ImageController : BaseJellyfinApiController
+             MaxWidth = maxWidth,
+             FillHeight = fillHeight,
+             FillWidth = fillWidth,
+-            Quality = quality ?? 100,
++            Quality = ResolveQuality(quality, maxWidth, maxHeight, width, height, fillWidth, fillHeight),
+             Width = width,
+             PercentPlayed = percentPlayed ?? 0,
+             UnplayedCount = unplayedCount,
+@@ -1917,6 +1926,28 @@ public class ImageController : BaseJellyfinApiController
+             SupportedOutputFormats = outputFormats
+         };
+ 
++        if (item is not null
++            && IsResize(maxWidth, maxHeight, width, height, fillWidth, fillHeight)
++            && !percentPlayed.HasValue
++            && !unplayedCount.HasValue
++            && !blur.HasValue
++            && string.IsNullOrEmpty(backgroundColor)
++            && string.IsNullOrEmpty(foregroundLayer)
++            && (imageIndex ?? 0) == 0)
++        {
++            _imageShapeTracker.Record(new ImageShape(
++                item.GetBaseItemKind(),
++                imageType,
++                maxWidth,
++                maxHeight,
++                width,
++                height,
++                fillWidth,
++                fillHeight,
++                options.Quality,
++                string.Join(',', outputFormats)));
++        }
++
+         return await GetImageResult(
+             options,
+             cacheDuration,
+@@ -1924,6 +1955,25 @@ public class ImageController : BaseJellyfinApiController
+             tag).ConfigureAwait(false);
+     }
+ 
++    /// <summary>
++    /// Gets the quality to encode with. A client that asks for a resized image but names no quality gets
++    /// <see cref="DefaultResizeQuality"/>; at 100 a 300 px poster is ~4x the bytes for no visible gain.
++    /// A request with no resize keeps 100, so the original file is still served untouched.
++    /// </summary>
++    /// <param name="quality">The requested quality.</param>
++    /// <param name="maxWidth">The requested max width.</param>
++    /// <param name="maxHeight">The requested max height.</param>
++    /// <param name="width">The requested width.</param>
++    /// <param name="height">The requested height.</param>
++    /// <param name="fillWidth">The requested fill width.</param>
++    /// <param name="fillHeight">The requested fill height.</param>
++    /// <returns>The quality.</returns>
++    public static int ResolveQuality(int? quality, int? maxWidth, int? maxHeight, int? width, int? height, int? fillWidth, int? fillHeight)
++        => quality ?? (IsResize(maxWidth, maxHeight, width, height, fillWidth, fillHeight) ? DefaultResizeQuality : 100);
++
++    private static bool IsResize(int? maxWidth, int? maxHeight, int? width, int? height, int? fillWidth, int? fillHeight)
++        => maxWidth.HasValue || maxHeight.HasValue || width.HasValue || height.HasValue || fillWidth.HasValue || fillHeight.HasValue;
++
+     private ImageFormat[] GetOutputFormats(ImageFormat? format)
+     {
+         if (format.HasValue)
+diff --git a/MediaBrowser.Controller/Drawing/IImageShapeTracker.cs b/MediaBrowser.Controller/Drawing/IImageShapeTracker.cs
+new file mode 100644
+index 0000000000..6fa9099b2a
+--- /dev/null
++++ b/MediaBrowser.Controller/Drawing/IImageShapeTracker.cs
+@@ -0,0 +1,34 @@
++using System.Collections.Generic;
++
++namespace MediaBrowser.Controller.Drawing;
++
++/// <summary>
++/// Counts the resize shapes clients actually request, so the shapes worth pre-rendering
++/// are learned from traffic instead of guessed.
++/// </summary>
++public interface IImageShapeTracker
++{
++    /// <summary>
++    /// Records one served request.
++    /// </summary>
++    /// <param name="shape">The request's shape.</param>
++    void Record(ImageShape shape);
++
++    /// <summary>
++    /// Gets the most requested shapes.
++    /// </summary>
++    /// <param name="minCount">The minimum number of requests a shape needs.</param>
++    /// <param name="limit">The maximum number of shapes to return.</param>
++    /// <returns>The shapes, most requested first.</returns>
++    IReadOnlyList<ImageShape> GetTopShapes(int minCount, int limit);
++
++    /// <summary>
++    /// Halves every count and forgets shapes that reach zero, so old client layouts fade out.
++    /// </summary>
++    void Decay();
++
++    /// <summary>
++    /// Writes the counts to disk.
++    /// </summary>
++    void Save();
++}
+diff --git a/MediaBrowser.Controller/Drawing/ImageShape.cs b/MediaBrowser.Controller/Drawing/ImageShape.cs
+new file mode 100644
+index 0000000000..3dfcbf972e
+--- /dev/null
++++ b/MediaBrowser.Controller/Drawing/ImageShape.cs
+@@ -0,0 +1,70 @@
++using System;
++using System.Linq;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Model.Drawing;
++using MediaBrowser.Model.Entities;
++
++namespace MediaBrowser.Controller.Drawing;
++
++/// <summary>
++/// The parameters of one resized image request, as the image cache keys it.
++/// Two requests with the same shape for the same image hit the same cache file.
++/// </summary>
++/// <param name="ItemKind">The kind of item the image belongs to.</param>
++/// <param name="ImageType">The image type.</param>
++/// <param name="MaxWidth">The requested max width.</param>
++/// <param name="MaxHeight">The requested max height.</param>
++/// <param name="Width">The requested fixed width.</param>
++/// <param name="Height">The requested fixed height.</param>
++/// <param name="FillWidth">The requested fill width.</param>
++/// <param name="FillHeight">The requested fill height.</param>
++/// <param name="Quality">The effective quality.</param>
++/// <param name="Formats">The output formats the client accepts, comma separated, in preference order.</param>
++public sealed record ImageShape(
++    BaseItemKind ItemKind,
++    ImageType ImageType,
++    int? MaxWidth,
++    int? MaxHeight,
++    int? Width,
++    int? Height,
++    int? FillWidth,
++    int? FillHeight,
++    int Quality,
++    string Formats)
++{
++    /// <summary>
++    /// Gets the accepted output formats.
++    /// </summary>
++    /// <returns>The formats, in preference order.</returns>
++    public ImageFormat[] GetFormats()
++        => Formats.Split(',', StringSplitOptions.RemoveEmptyEntries)
++            .Select(f => Enum.TryParse<ImageFormat>(f, out var format) ? (ImageFormat?)format : null)
++            .Where(f => f.HasValue)
++            .Select(f => f!.Value)
++            .ToArray();
++
++    /// <summary>
++    /// Builds the processing options a live request of this shape would use for the given image.
++    /// </summary>
++    /// <param name="item">The item.</param>
++    /// <param name="image">The item's image of <see cref="ImageType"/>.</param>
++    /// <returns>The options.</returns>
++    public ImageProcessingOptions ToOptions(BaseItem item, ItemImageInfo image)
++        => new ImageProcessingOptions
++        {
++            Height = Height,
++            ImageIndex = 0,
++            Image = image,
++            Item = item,
++            ItemId = item.Id,
++            MaxHeight = MaxHeight,
++            MaxWidth = MaxWidth,
++            FillHeight = FillHeight,
++            FillWidth = FillWidth,
++            Quality = Quality,
++            Width = Width,
++            PercentPlayed = 0,
++            SupportedOutputFormats = GetFormats()
++        };
++}
+diff --git a/tests/Jellyfin.Api.Tests/Controllers/ImageControllerTests.cs b/tests/Jellyfin.Api.Tests/Controllers/ImageControllerTests.cs
+index 5034ad3c71..4af0a1f409 100644
+--- a/tests/Jellyfin.Api.Tests/Controllers/ImageControllerTests.cs
++++ b/tests/Jellyfin.Api.Tests/Controllers/ImageControllerTests.cs
+@@ -32,4 +32,17 @@ public static class ImageControllerTests
+         Assert.False(ImageController.TryGetImageExtensionFromContentType(contentType, out var ex));
+         Assert.Null(ex);
+     }
++
++    [Theory]
++    [InlineData(null, 200, 300, null, ImageController.DefaultResizeQuality)]
++    [InlineData(null, null, 300, null, ImageController.DefaultResizeQuality)]
++    [InlineData(null, null, null, 24, ImageController.DefaultResizeQuality)]
++    [InlineData(null, null, null, null, 100)]
++    [InlineData(60, 200, 300, null, 60)]
++    [InlineData(85, null, null, null, 85)]
++    [InlineData(100, 200, 300, null, 100)]
++    public static void ResolveQuality_DefaultsOnlyWhenAbsentAndResizing(int? quality, int? maxWidth, int? maxHeight, int? fillHeight, int expected)
++    {
++        Assert.Equal(expected, ImageController.ResolveQuality(quality, maxWidth, maxHeight, null, null, null, fillHeight));
++    }
+ }
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Images/ImageShapeTrackerTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Images/ImageShapeTrackerTests.cs
+new file mode 100644
+index 0000000000..6152bd2d0c
+--- /dev/null
++++ b/tests/Jellyfin.Server.Implementations.Tests/Images/ImageShapeTrackerTests.cs
+@@ -0,0 +1,152 @@
++using System;
++using System.IO;
++using System.Linq;
++using Emby.Server.Implementations.Images;
++using Emby.Server.Implementations.ScheduledTasks.Tasks;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller.Drawing;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.Movies;
++using MediaBrowser.Model.Drawing;
++using MediaBrowser.Model.Entities;
++using Microsoft.Extensions.Logging.Abstractions;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Server.Implementations.Tests.Images;
++
++public sealed class ImageShapeTrackerTests : IDisposable
++{
++    private readonly string _dir = Path.Combine(Path.GetTempPath(), "shape-tests-" + Guid.NewGuid().ToString("N"));
++
++    public ImageShapeTrackerTests() => Directory.CreateDirectory(_dir);
++
++    public void Dispose() => Directory.Delete(_dir, true);
++
++    private static ImageShape Poster(int maxHeight, int quality = 60)
++        => new(BaseItemKind.Movie, ImageType.Primary, (int)Math.Round(maxHeight * 2 / 3.0), maxHeight, null, null, null, null, quality, "Webp,Jpg");
++
++    private ImageShapeTracker NewTracker()
++    {
++        var paths = new Mock<IApplicationPaths>();
++        paths.SetupGet(p => p.DataPath).Returns(_dir);
++        return new ImageShapeTracker(paths.Object, NullLogger<ImageShapeTracker>.Instance);
++    }
++
++    [Fact]
++    public void GetTopShapes_RanksByCountAndAppliesMinCount()
++    {
++        var tracker = NewTracker();
++        for (var i = 0; i < 5; i++)
++        {
++            tracker.Record(Poster(300));
++        }
++
++        for (var i = 0; i < 3; i++)
++        {
++            tracker.Record(Poster(450, 85));
++        }
++
++        tracker.Record(Poster(1080));
++
++        var top = tracker.GetTopShapes(3, 10);
++
++        Assert.Equal(new[] { Poster(300), Poster(450, 85) }, top);
++        Assert.Single(tracker.GetTopShapes(1, 1));
++    }
++
++    [Fact]
++    public void Record_IgnoresNewShapesBeyondCap()
++    {
++        var tracker = NewTracker();
++        for (var h = 1; h <= ImageShapeTracker.MaxShapes + 10; h++)
++        {
++            tracker.Record(Poster(h));
++        }
++
++        Assert.Equal(ImageShapeTracker.MaxShapes, tracker.GetTopShapes(1, int.MaxValue).Count);
++
++        // A shape already known still counts once the cap is reached.
++        tracker.Record(Poster(1));
++        Assert.Equal(Poster(1), tracker.GetTopShapes(2, 1).Single());
++    }
++
++    [Fact]
++    public void Decay_HalvesCountsAndDropsZeros()
++    {
++        var tracker = NewTracker();
++        for (var i = 0; i < 6; i++)
++        {
++            tracker.Record(Poster(300));
++        }
++
++        tracker.Record(Poster(450));
++
++        tracker.Decay();
++
++        Assert.Equal(new[] { Poster(300) }, tracker.GetTopShapes(1, 10));
++        Assert.Single(tracker.GetTopShapes(3, 10));
++        Assert.Empty(tracker.GetTopShapes(4, 10));
++    }
++
++    [Fact]
++    public void Save_RoundTripsThroughANewInstance()
++    {
++        var tracker = NewTracker();
++        for (var i = 0; i < 4; i++)
++        {
++            tracker.Record(Poster(300));
++        }
++
++        tracker.Save();
++
++        var reloaded = NewTracker();
++        Assert.Equal(new[] { Poster(300) }, reloaded.GetTopShapes(4, 10));
++    }
++
++    [Fact]
++    public void Load_IgnoresACorruptFile()
++    {
++        File.WriteAllText(Path.Combine(_dir, "image-shapes.json"), "{not json");
++        Assert.Empty(NewTracker().GetTopShapes(1, 10));
++    }
++
++    [Fact]
++    public void ToOptions_MatchesTheLiveRequestCacheInputs()
++    {
++        var shape = new ImageShape(BaseItemKind.Movie, ImageType.Primary, 133, 200, null, null, null, null, 60, "Webp,Jpg");
++        var item = new Movie { Id = Guid.NewGuid() };
++        var image = new ItemImageInfo { Path = "/config/metadata/poster.jpg", Type = ImageType.Primary, DateModified = DateTime.UtcNow };
++
++        var options = shape.ToOptions(item, image);
++
++        // Every input of ImageProcessor's cache file name, as ImageController sets it for the same request.
++        Assert.Same(image, options.Image);
++        Assert.Equal(133, options.MaxWidth);
++        Assert.Equal(200, options.MaxHeight);
++        Assert.Null(options.Width);
++        Assert.Null(options.Height);
++        Assert.Null(options.FillWidth);
++        Assert.Null(options.FillHeight);
++        Assert.Equal(60, options.Quality);
++        Assert.Equal(new[] { ImageFormat.Webp, ImageFormat.Jpg }, options.SupportedOutputFormats);
++        Assert.Equal(0, options.PercentPlayed);
++        Assert.Null(options.UnplayedCount);
++        Assert.Null(options.Blur);
++        Assert.Null(options.BackgroundColor);
++        Assert.Null(options.ForegroundLayer);
++        Assert.Equal(0, options.ImageIndex);
++        Assert.Equal(item.Id, options.ItemId);
++    }
++
++    [Fact]
++    public void PlanByKind_GroupsShapesAndKeepsRankOrder()
++    {
++        var episode = new ImageShape(BaseItemKind.Episode, ImageType.Primary, 356, 200, null, null, null, null, 60, "Jpg");
++        var plan = ImagePrerenderTask.PlanByKind(new[] { Poster(300), episode, Poster(450, 85) });
++
++        Assert.Equal(new[] { Poster(300), Poster(450, 85) }, plan[BaseItemKind.Movie]);
++        Assert.Equal(new[] { episode }, plan[BaseItemKind.Episode]);
++    }
++}

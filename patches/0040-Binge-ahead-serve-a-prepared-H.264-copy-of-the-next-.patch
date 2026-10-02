@@ -1,0 +1,1443 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sat, 3 Oct 2026 00:26:51 +0100
+Subject: [PATCH] Binge-ahead: serve a prepared H.264 copy of the next episodes
+ to devices that can't play them
+
+A Fire TV Stick on the official app can't play HEVC Main 10, so every episode
+of a show it binges is transcoded live (16 of 21 transcodes in a week, one
+series in order). The order is predictable, and the server is idle at night.
+
+When PlaybackInfo would transcode an episode for video reasons only, the
+device and series are recorded (data/binge-ahead.json). The daily
+"Binge-ahead" task (04:00, skipped while anything plays) prepares the next 2
+unplayed episodes of those series whose video has the same codec/bit
+depth/range: -map 0 -c copy -c:v:0 h264_vaapi, so every stream keeps its
+index, and the result is discarded unless the stream layout matches.
+
+The 0.19.11 app always asks for the original's media source id and composes
+its own stream URL with no token or session id. So the prepared file is
+answered under the original id as direct play, and that client's address is
+remembered for the item for 12 hours; its static stream request is served
+from the prepared file. Every other client and decision gets the original.
+Prepared files are deleted once played or after 14 days, at most 4 kept.
+---
+ .../ApplicationHost.cs                        |   1 +
+ .../Library/PreparedMediaStore.cs             | 237 ++++++++++++++
+ .../ScheduledTasks/Tasks/BingeAheadTask.cs    | 299 ++++++++++++++++++
+ .../Controllers/MediaInfoController.cs        |  62 +++-
+ Jellyfin.Api/Helpers/StreamingHelpers.cs      |   9 +
+ .../MediaEncoding/IPreparedMediaStore.cs      |  81 +++++
+ .../MediaEncoding/PreparedDeviceRecord.cs     |  30 ++
+ .../MediaEncoding/PreparedMedia.cs            | 214 +++++++++++++
+ .../MediaEncoding/PreparedMediaInfo.cs        |  36 +++
+ .../MediaEncoding/PreparedMediaTests.cs       | 163 ++++++++++
+ .../Library/PreparedMediaStoreTests.cs        | 131 ++++++++
+ 11 files changed, 1261 insertions(+), 2 deletions(-)
+ create mode 100644 Emby.Server.Implementations/Library/PreparedMediaStore.cs
+ create mode 100644 Emby.Server.Implementations/ScheduledTasks/Tasks/BingeAheadTask.cs
+ create mode 100644 MediaBrowser.Controller/MediaEncoding/IPreparedMediaStore.cs
+ create mode 100644 MediaBrowser.Controller/MediaEncoding/PreparedDeviceRecord.cs
+ create mode 100644 MediaBrowser.Controller/MediaEncoding/PreparedMedia.cs
+ create mode 100644 MediaBrowser.Controller/MediaEncoding/PreparedMediaInfo.cs
+ create mode 100644 tests/Jellyfin.Controller.Tests/MediaEncoding/PreparedMediaTests.cs
+ create mode 100644 tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
+
+diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
+index b35f1cb821..3ee904f2a7 100644
+--- a/Emby.Server.Implementations/ApplicationHost.cs
++++ b/Emby.Server.Implementations/ApplicationHost.cs
+@@ -595,6 +595,7 @@ namespace Emby.Server.Implementations
+ 
+             serviceCollection.AddSingleton<IImageProcessor, ImageProcessor>();
+             serviceCollection.AddSingleton<IImageShapeTracker, ImageShapeTracker>();
++            serviceCollection.AddSingleton<IPreparedMediaStore, PreparedMediaStore>();
+ 
+             serviceCollection.AddSingleton<ITVSeriesManager, TVSeriesManager>();
+ 
+diff --git a/Emby.Server.Implementations/Library/PreparedMediaStore.cs b/Emby.Server.Implementations/Library/PreparedMediaStore.cs
+new file mode 100644
+index 0000000000..982a1809fa
+--- /dev/null
++++ b/Emby.Server.Implementations/Library/PreparedMediaStore.cs
+@@ -0,0 +1,237 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.Globalization;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++using Jellyfin.Extensions.Json;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Model.Dto;
++using Microsoft.Extensions.Logging;
++
++namespace Emby.Server.Implementations.Library;
++
++/// <summary>
++/// Prepared files live in <c>cache/prepared/{itemId}.mkv</c> with a <c>{itemId}.json</c> probe result next to them.
++/// Device records are kept in <c>data/binge-ahead.json</c>. Which client is being served a prepared file is
++/// in memory only, keyed by client address because the clients that need this compose their own stream URL
++/// and send no token or session id with it.
++/// </summary>
++public sealed class PreparedMediaStore : IPreparedMediaStore
++{
++    /// <summary>
++    /// How long a client keeps being served the prepared file after its PlaybackInfo chose it.
++    /// </summary>
++    public static readonly TimeSpan ServingLifetime = TimeSpan.FromHours(12);
++
++    private readonly ConcurrentDictionary<(string Ip, Guid ItemId), DateTime> _serving = new();
++    private readonly string _devicesPath;
++    private readonly ILogger<PreparedMediaStore> _logger;
++    private readonly object _devicesLock = new();
++    private readonly Func<DateTime> _now;
++    private Dictionary<string, PreparedDeviceRecord> _devices;
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="PreparedMediaStore"/> class.
++    /// </summary>
++    /// <param name="appPaths">The application paths.</param>
++    /// <param name="logger">The logger.</param>
++    public PreparedMediaStore(IApplicationPaths appPaths, ILogger<PreparedMediaStore> logger)
++        : this(Path.Combine(appPaths.CachePath, "prepared"), Path.Combine(appPaths.DataPath, "binge-ahead.json"), logger, () => DateTime.UtcNow)
++    {
++    }
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="PreparedMediaStore"/> class.
++    /// </summary>
++    /// <param name="directory">The folder prepared files live in.</param>
++    /// <param name="devicesPath">The device records file.</param>
++    /// <param name="logger">The logger.</param>
++    /// <param name="now">The clock.</param>
++    public PreparedMediaStore(string directory, string devicesPath, ILogger<PreparedMediaStore> logger, Func<DateTime> now)
++    {
++        Directory = directory;
++        _devicesPath = devicesPath;
++        _logger = logger;
++        _now = now;
++        _devices = LoadDevices();
++    }
++
++    /// <inheritdoc />
++    public string Directory { get; }
++
++    /// <inheritdoc />
++    public string GetPreparedPath(Guid itemId)
++        => Path.Combine(Directory, itemId.ToString("N", CultureInfo.InvariantCulture) + ".mkv");
++
++    /// <inheritdoc />
++    public MediaSourceInfo? GetPreparedSource(MediaSourceInfo original)
++    {
++        if (!Guid.TryParse(original.Id, out var itemId))
++        {
++            return null;
++        }
++
++        var info = ReadInfo(itemId);
++        var path = GetPreparedPath(itemId);
++        if (info is null || !File.Exists(path))
++        {
++            return null;
++        }
++
++        return PreparedMedia.CreateSource(original, path, info);
++    }
++
++    /// <inheritdoc />
++    public void SetServing(string clientIp, Guid itemId, bool active)
++    {
++        if (active)
++        {
++            _serving[(clientIp, itemId)] = _now() + ServingLifetime;
++        }
++        else
++        {
++            _serving.TryRemove((clientIp, itemId), out _);
++        }
++    }
++
++    /// <inheritdoc />
++    public MediaSourceInfo? GetServing(string clientIp, MediaSourceInfo original)
++    {
++        if (!Guid.TryParse(original.Id, out var itemId)
++            || !_serving.TryGetValue((clientIp, itemId), out var expires))
++        {
++            return null;
++        }
++
++        if (expires < _now())
++        {
++            _serving.TryRemove((clientIp, itemId), out _);
++            return null;
++        }
++
++        // A file evicted since PlaybackInfo falls back to the original.
++        return GetPreparedSource(original);
++    }
++
++    /// <inheritdoc />
++    public void RecordTranscode(string deviceId, Guid userId, Guid seriesId, string signature)
++    {
++        lock (_devicesLock)
++        {
++            if (!_devices.TryGetValue(deviceId, out var record))
++            {
++                record = new PreparedDeviceRecord { DeviceId = deviceId };
++                _devices[deviceId] = record;
++            }
++
++            record.UserId = userId;
++            record.LastSeen = _now();
++            record.Series[seriesId] = signature;
++            SaveDevices();
++        }
++    }
++
++    /// <inheritdoc />
++    public IReadOnlyList<PreparedDeviceRecord> GetDevices(TimeSpan within)
++    {
++        lock (_devicesLock)
++        {
++            var since = _now() - within;
++            return _devices.Values.Where(d => d.LastSeen >= since).ToList();
++        }
++    }
++
++    /// <inheritdoc />
++    public IReadOnlyList<PreparedMediaInfo> ListPrepared()
++    {
++        if (!System.IO.Directory.Exists(Directory))
++        {
++            return [];
++        }
++
++        return System.IO.Directory.EnumerateFiles(Directory, "*.json")
++            .Select(f => Guid.TryParse(Path.GetFileNameWithoutExtension(f), out var id) ? ReadInfo(id) : null)
++            .OfType<PreparedMediaInfo>()
++            .ToList();
++    }
++
++    /// <inheritdoc />
++    public void SavePrepared(PreparedMediaInfo info)
++    {
++        System.IO.Directory.CreateDirectory(Directory);
++        File.WriteAllText(GetInfoPath(info.ItemId), JsonSerializer.Serialize(info, JsonDefaults.Options));
++    }
++
++    /// <inheritdoc />
++    public void DeletePrepared(Guid itemId)
++    {
++        foreach (var path in new[] { GetPreparedPath(itemId), GetInfoPath(itemId) })
++        {
++            try
++            {
++                File.Delete(path);
++            }
++            catch (IOException ex)
++            {
++                _logger.LogWarning(ex, "Could not delete prepared file {Path}", path);
++            }
++        }
++    }
++
++    private string GetInfoPath(Guid itemId)
++        => Path.Combine(Directory, itemId.ToString("N", CultureInfo.InvariantCulture) + ".json");
++
++    private PreparedMediaInfo? ReadInfo(Guid itemId)
++    {
++        var path = GetInfoPath(itemId);
++        if (!File.Exists(path))
++        {
++            return null;
++        }
++
++        try
++        {
++            return JsonSerializer.Deserialize<PreparedMediaInfo>(File.ReadAllText(path), JsonDefaults.Options);
++        }
++        catch (Exception ex) when (ex is IOException or JsonException)
++        {
++            _logger.LogWarning(ex, "Ignoring unreadable prepared info {Path}", path);
++            return null;
++        }
++    }
++
++    private Dictionary<string, PreparedDeviceRecord> LoadDevices()
++    {
++        try
++        {
++            if (File.Exists(_devicesPath))
++            {
++                var records = JsonSerializer.Deserialize<List<PreparedDeviceRecord>>(File.ReadAllText(_devicesPath), JsonDefaults.Options) ?? [];
++                return records.ToDictionary(r => r.DeviceId, StringComparer.Ordinal);
++            }
++        }
++        catch (Exception ex) when (ex is IOException or JsonException or ArgumentException)
++        {
++            _logger.LogWarning(ex, "Ignoring unreadable binge-ahead records {Path}", _devicesPath);
++        }
++
++        return new Dictionary<string, PreparedDeviceRecord>(StringComparer.Ordinal);
++    }
++
++    private void SaveDevices()
++    {
++        try
++        {
++            var tmp = _devicesPath + ".tmp";
++            File.WriteAllText(tmp, JsonSerializer.Serialize(_devices.Values.ToList(), JsonDefaults.Options));
++            File.Move(tmp, _devicesPath, true);
++        }
++        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
++        {
++            _logger.LogWarning(ex, "Could not save binge-ahead records {Path}", _devicesPath);
++        }
++    }
++}
+diff --git a/Emby.Server.Implementations/ScheduledTasks/Tasks/BingeAheadTask.cs b/Emby.Server.Implementations/ScheduledTasks/Tasks/BingeAheadTask.cs
+new file mode 100644
+index 0000000000..5724e14e5a
+--- /dev/null
++++ b/Emby.Server.Implementations/ScheduledTasks/Tasks/BingeAheadTask.cs
+@@ -0,0 +1,299 @@
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.IO;
++using System.Linq;
++using System.Threading;
++using System.Threading.Tasks;
++using Jellyfin.Data.Enums;
++using Jellyfin.Database.Implementations.Enums;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller.Dto;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.TV;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Controller.Session;
++using MediaBrowser.Model.Dlna;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.MediaInfo;
++using MediaBrowser.Model.Tasks;
++using Microsoft.Extensions.Logging;
++
++namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
++
++/// <summary>
++/// Binge-ahead: overnight, prepares an H.264 copy of the next episodes a device is likely to watch but can't
++/// play, so they direct play instead of being transcoded live. Only series a device actually transcoded are
++/// considered: Next Up is per user and is shared with TVs that play the originals fine.
++/// </summary>
++public class BingeAheadTask : IScheduledTask
++{
++    /// <summary>
++    /// Episodes prepared per series.
++    /// </summary>
++    public const int EpisodesPerSeries = 2;
++
++    /// <summary>
++    /// The most prepared files kept at once.
++    /// </summary>
++    public const int MaxPrepared = 4;
++
++    /// <summary>
++    /// Prepared files older than this are deleted.
++    /// </summary>
++    public static readonly TimeSpan MaxAge = TimeSpan.FromDays(14);
++
++    private readonly IPreparedMediaStore _store;
++    private readonly ILibraryManager _libraryManager;
++    private readonly IUserManager _userManager;
++    private readonly IUserDataManager _userDataManager;
++    private readonly ISessionManager _sessionManager;
++    private readonly IMediaEncoder _mediaEncoder;
++    private readonly IConfigurationManager _configurationManager;
++    private readonly ILogger<BingeAheadTask> _logger;
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="BingeAheadTask"/> class.
++    /// </summary>
++    /// <param name="store">The prepared media store.</param>
++    /// <param name="libraryManager">The library manager.</param>
++    /// <param name="userManager">The user manager.</param>
++    /// <param name="userDataManager">The user data manager.</param>
++    /// <param name="sessionManager">The session manager.</param>
++    /// <param name="mediaEncoder">The media encoder.</param>
++    /// <param name="configurationManager">The configuration manager.</param>
++    /// <param name="logger">The logger.</param>
++    public BingeAheadTask(
++        IPreparedMediaStore store,
++        ILibraryManager libraryManager,
++        IUserManager userManager,
++        IUserDataManager userDataManager,
++        ISessionManager sessionManager,
++        IMediaEncoder mediaEncoder,
++        IConfigurationManager configurationManager,
++        ILogger<BingeAheadTask> logger)
++    {
++        _store = store;
++        _libraryManager = libraryManager;
++        _userManager = userManager;
++        _userDataManager = userDataManager;
++        _sessionManager = sessionManager;
++        _mediaEncoder = mediaEncoder;
++        _configurationManager = configurationManager;
++        _logger = logger;
++    }
++
++    /// <inheritdoc />
++    public string Name => "Binge-ahead";
++
++    /// <inheritdoc />
++    public string Description => "Prepares H.264 copies of the next episodes for devices that had to transcode them.";
++
++    /// <inheritdoc />
++    public string Category => "Library";
++
++    /// <inheritdoc />
++    public string Key => "BingeAhead";
++
++    /// <inheritdoc />
++    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
++    {
++        var devices = _store.GetDevices(MaxAge);
++        Evict(devices);
++
++        if (IsAnythingPlaying())
++        {
++            _logger.LogInformation("Binge-ahead skipped: something is playing");
++            return;
++        }
++
++        var prepared = _store.ListPrepared().Select(p => p.ItemId).ToHashSet();
++        var todo = FindEpisodes(devices).Where(e => !prepared.Contains(e.Id)).ToList();
++        var room = Math.Max(0, MaxPrepared - prepared.Count);
++        todo = todo.Take(room).ToList();
++
++        for (var i = 0; i < todo.Count; i++)
++        {
++            cancellationToken.ThrowIfCancellationRequested();
++            if (IsAnythingPlaying())
++            {
++                _logger.LogInformation("Binge-ahead stopped: playback started");
++                break;
++            }
++
++            await PrepareAsync(todo[i], cancellationToken).ConfigureAwait(false);
++            progress.Report(100d * (i + 1) / todo.Count);
++        }
++
++        progress.Report(100);
++    }
++
++    /// <inheritdoc />
++    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
++    {
++        // After the evening's viewing, which runs past 01:30 here, and before the 03:30 image pre-render ends.
++        yield return new TaskTriggerInfo
++        {
++            Type = TaskTriggerInfoType.DailyTrigger,
++            TimeOfDayTicks = TimeSpan.FromHours(4).Ticks,
++            MaxRuntimeTicks = TimeSpan.FromHours(3).Ticks
++        };
++    }
++
++    private bool IsAnythingPlaying()
++        => _sessionManager.Sessions.Any(s => s.NowPlayingItem is not null);
++
++    private void Evict(IReadOnlyList<PreparedDeviceRecord> devices)
++    {
++        var users = devices.Select(d => _userManager.GetUserById(d.UserId)).OfType<Jellyfin.Database.Implementations.Entities.User>().ToList();
++        foreach (var info in _store.ListPrepared())
++        {
++            var item = _libraryManager.GetItemById(info.ItemId);
++            var played = item is not null && users.Any(u => _userDataManager.GetUserData(u, item)?.Played == true);
++            if (item is null || played || info.Created < DateTime.UtcNow - MaxAge)
++            {
++                _logger.LogInformation("Binge-ahead: removing prepared copy of {Item}", item?.Name ?? info.ItemId.ToString());
++                _store.DeletePrepared(info.ItemId);
++            }
++        }
++    }
++
++    private IEnumerable<Episode> FindEpisodes(IReadOnlyList<PreparedDeviceRecord> devices)
++    {
++        foreach (var device in devices.OrderByDescending(d => d.LastSeen))
++        {
++            var user = _userManager.GetUserById(device.UserId);
++            if (user is null)
++            {
++                continue;
++            }
++
++            foreach (var (seriesId, signature) in device.Series)
++            {
++                var episodes = _libraryManager.GetItemList(new InternalItemsQuery(user)
++                    {
++                        AncestorIds = [seriesId],
++                        IncludeItemTypes = [BaseItemKind.Episode],
++                        IsVirtualItem = false,
++                        Recursive = true,
++                        OrderBy = [(ItemSortBy.ParentIndexNumber, SortOrder.Ascending), (ItemSortBy.IndexNumber, SortOrder.Ascending)],
++                        DtoOptions = new DtoOptions(false)
++                    })
++                    .OfType<Episode>()
++                    .Where(e => e.ParentIndexNumber is not 0)
++                    .ToList();
++
++                var next = PreparedMedia.SelectNext(
++                    episodes,
++                    e => _userDataManager.GetUserData(user, e)?.Played == true,
++                    e => e.GetDefaultVideoStream(),
++                    signature,
++                    EpisodesPerSeries);
++
++                foreach (var episode in next)
++                {
++                    yield return episode;
++                }
++            }
++        }
++    }
++
++    private async Task PrepareAsync(Episode episode, CancellationToken cancellationToken)
++    {
++        var finalPath = _store.GetPreparedPath(episode.Id);
++        var partPath = finalPath + ".part";
++        Directory.CreateDirectory(_store.Directory);
++
++        var encoding = _configurationManager.GetEncodingOptions();
++        var vaapi = encoding.HardwareAccelerationType == HardwareAccelerationType.vaapi ? encoding.VaapiDevice : null;
++        var video = episode.GetDefaultVideoStream();
++        var args = PreparedMedia.BuildArguments(episode.Path, partPath, vaapi, PreparedMedia.TargetBitrate(video?.BitRate));
++
++        _logger.LogInformation("Binge-ahead: preparing {Series} {Episode}", episode.SeriesName, episode.Name);
++        var started = Stopwatch.StartNew();
++        try
++        {
++            if (!await RunFfmpegAsync(args, cancellationToken).ConfigureAwait(false))
++            {
++                return;
++            }
++
++            var probe = await _mediaEncoder.GetMediaInfo(
++                new MediaInfoRequest
++                {
++                    MediaSource = new MediaSourceInfo { Path = partPath, Protocol = MediaProtocol.File },
++                    MediaType = DlnaProfileType.Video,
++                    ExtractChapters = false
++                },
++                cancellationToken).ConfigureAwait(false);
++
++            if (!PreparedMedia.StreamLayoutMatches(episode.GetMediaStreams(), probe.MediaStreams))
++            {
++                _logger.LogWarning("Binge-ahead: streams of the prepared {Episode} don't line up with the original; discarded", episode.Name);
++                return;
++            }
++
++            File.Move(partPath, finalPath, true);
++            _store.SavePrepared(new PreparedMediaInfo
++            {
++                ItemId = episode.Id,
++                Created = DateTime.UtcNow,
++                Size = new FileInfo(finalPath).Length,
++                Bitrate = probe.Bitrate,
++                MediaStreams = probe.MediaStreams
++            });
++            _logger.LogInformation("Binge-ahead: prepared {Episode} in {Elapsed}", episode.Name, started.Elapsed);
++        }
++        finally
++        {
++            if (File.Exists(partPath))
++            {
++                File.Delete(partPath);
++            }
++        }
++    }
++
++    private async Task<bool> RunFfmpegAsync(string args, CancellationToken cancellationToken)
++    {
++        using var process = new Process
++        {
++            StartInfo = new ProcessStartInfo(_mediaEncoder.EncoderPath, args)
++            {
++                UseShellExecute = false,
++                CreateNoWindow = true,
++                RedirectStandardError = true
++            }
++        };
++
++        process.Start();
++        try
++        {
++            process.PriorityClass = ProcessPriorityClass.BelowNormal;
++        }
++        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
++        {
++            _logger.LogDebug(ex, "Could not lower the ffmpeg priority");
++        }
++
++        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
++        try
++        {
++            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
++        }
++        catch (OperationCanceledException)
++        {
++            process.Kill(true);
++            throw;
++        }
++
++        if (process.ExitCode != 0)
++        {
++            _logger.LogWarning("Binge-ahead: ffmpeg exited with {Code}: {Error}", process.ExitCode, await stderr.ConfigureAwait(false));
++            return false;
++        }
++
++        return true;
++    }
++}
+diff --git a/Jellyfin.Api/Controllers/MediaInfoController.cs b/Jellyfin.Api/Controllers/MediaInfoController.cs
+index aa942e7642..b06777b00b 100644
+--- a/Jellyfin.Api/Controllers/MediaInfoController.cs
++++ b/Jellyfin.Api/Controllers/MediaInfoController.cs
+@@ -1,6 +1,7 @@
+ using System;
+ using System.Buffers;
+ using System.ComponentModel.DataAnnotations;
++using System.Globalization;
+ using System.Linq;
+ using System.Net.Mime;
+ using System.Threading.Tasks;
+@@ -12,7 +13,10 @@ using Jellyfin.Extensions;
+ using MediaBrowser.Common.Extensions;
+ using MediaBrowser.Controller.Devices;
+ using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.TV;
+ using MediaBrowser.Controller.Library;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Model.Dto;
+ using MediaBrowser.Model.MediaInfo;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Http;
+@@ -35,6 +39,7 @@ public class MediaInfoController : BaseJellyfinApiController
+     private readonly ILogger<MediaInfoController> _logger;
+     private readonly MediaInfoHelper _mediaInfoHelper;
+     private readonly IUserManager _userManager;
++    private readonly IPreparedMediaStore _preparedMediaStore;
+ 
+     /// <summary>
+     /// Initializes a new instance of the <see cref="MediaInfoController"/> class.
+@@ -45,13 +50,15 @@ public class MediaInfoController : BaseJellyfinApiController
+     /// <param name="logger">Instance of the <see cref="ILogger{MediaInfoController}"/> interface.</param>
+     /// <param name="mediaInfoHelper">Instance of the <see cref="MediaInfoHelper"/>.</param>
+     /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface..</param>
++    /// <param name="preparedMediaStore">Instance of the <see cref="IPreparedMediaStore"/> interface.</param>
+     public MediaInfoController(
+         IMediaSourceManager mediaSourceManager,
+         IDeviceManager deviceManager,
+         ILibraryManager libraryManager,
+         ILogger<MediaInfoController> logger,
+         MediaInfoHelper mediaInfoHelper,
+-        IUserManager userManager)
++        IUserManager userManager,
++        IPreparedMediaStore preparedMediaStore)
+     {
+         _mediaSourceManager = mediaSourceManager;
+         _deviceManager = deviceManager;
+@@ -59,6 +66,7 @@ public class MediaInfoController : BaseJellyfinApiController
+         _logger = logger;
+         _mediaInfoHelper = mediaInfoHelper;
+         _userManager = userManager;
++        _preparedMediaStore = preparedMediaStore;
+     }
+ 
+     /// <summary>
+@@ -190,7 +198,7 @@ public class MediaInfoController : BaseJellyfinApiController
+         if (profile is not null)
+         {
+             // set device specific data
+-            foreach (var mediaSource in info.MediaSources)
++            void SetDeviceData(MediaSourceInfo mediaSource)
+             {
+                 _mediaInfoHelper.SetDeviceSpecificData(
+                     item,
+@@ -214,6 +222,13 @@ public class MediaInfoController : BaseJellyfinApiController
+                     Request.HttpContext.GetNormalizedRemoteIP());
+             }
+ 
++            foreach (var mediaSource in info.MediaSources)
++            {
++                SetDeviceData(mediaSource);
++            }
++
++            ApplyPreparedMedia(item, info, liveStreamId, SetDeviceData);
++
+             _mediaInfoHelper.SortMediaSources(info, maxStreamingBitrate, item.Id);
+         }
+ 
+@@ -342,4 +357,47 @@ public class MediaInfoController : BaseJellyfinApiController
+             ArrayPool<byte>.Shared.Return(buffer);
+         }
+     }
++
++    /// <summary>
++    /// Binge-ahead: when this client would transcode the original for video reasons only and a prepared H.264
++    /// copy exists, answer with the prepared file under the original source id, and remember the client so its
++    /// stream request is served from that file. Any other outcome clears the entry for this client and item.
++    /// </summary>
++    private void ApplyPreparedMedia(BaseItem item, PlaybackInfoResponse info, string? liveStreamId, Action<MediaSourceInfo> setDeviceData)
++    {
++        var clientIp = Request.HttpContext.GetNormalizedRemoteIP().ToString();
++        var itemSourceId = item.Id.ToString("N", CultureInfo.InvariantCulture);
++        var original = info.MediaSources.Count == 1 && string.IsNullOrEmpty(liveStreamId)
++            ? info.MediaSources.FirstOrDefault(s => string.Equals(s.Id, itemSourceId, StringComparison.OrdinalIgnoreCase))
++            : null;
++
++        if (original is null || !PreparedMedia.IsReplaceable(original))
++        {
++            _preparedMediaStore.SetServing(clientIp, item.Id, false);
++            return;
++        }
++
++        if (item is Episode episode && !episode.SeriesId.IsEmpty()
++            && original.VideoStream is { } video
++            && User.GetDeviceId() is { } deviceId)
++        {
++            _preparedMediaStore.RecordTranscode(deviceId, User.GetUserId(), episode.SeriesId, PreparedMedia.Signature(video));
++        }
++
++        var prepared = _preparedMediaStore.GetPreparedSource(original);
++        if (prepared is not null)
++        {
++            setDeviceData(prepared);
++        }
++
++        if (prepared is null || !prepared.SupportsDirectPlay)
++        {
++            _preparedMediaStore.SetServing(clientIp, item.Id, false);
++            return;
++        }
++
++        _logger.LogInformation("Serving the prepared copy of {Item} to {Client} as direct play", item.Name, clientIp);
++        info.MediaSources = [prepared];
++        _preparedMediaStore.SetServing(clientIp, item.Id, true);
++    }
+ }
+diff --git a/Jellyfin.Api/Helpers/StreamingHelpers.cs b/Jellyfin.Api/Helpers/StreamingHelpers.cs
+index 60c5bb2ef6..eff913d58d 100644
+--- a/Jellyfin.Api/Helpers/StreamingHelpers.cs
++++ b/Jellyfin.Api/Helpers/StreamingHelpers.cs
+@@ -136,6 +136,15 @@ public static class StreamingHelpers
+                 {
+                     mediaSource = mediaSources[0];
+                 }
++
++                // Binge-ahead: a client whose PlaybackInfo was answered with a prepared copy streams that file.
++                // These clients send neither a token nor a session id with the stream URL, so the client address is the key.
++                if (mediaSource is not null
++                    && httpContext.RequestServices.GetService(typeof(IPreparedMediaStore)) is IPreparedMediaStore preparedMediaStore
++                    && preparedMediaStore.GetServing(httpContext.GetNormalizedRemoteIP().ToString(), mediaSource) is { } prepared)
++                {
++                    mediaSource = prepared;
++                }
+             }
+         }
+         else
+diff --git a/MediaBrowser.Controller/MediaEncoding/IPreparedMediaStore.cs b/MediaBrowser.Controller/MediaEncoding/IPreparedMediaStore.cs
+new file mode 100644
+index 0000000000..23730728c3
+--- /dev/null
++++ b/MediaBrowser.Controller/MediaEncoding/IPreparedMediaStore.cs
+@@ -0,0 +1,81 @@
++using System;
++using System.Collections.Generic;
++using MediaBrowser.Model.Dto;
++
++namespace MediaBrowser.Controller.MediaEncoding;
++
++/// <summary>
++/// Binge-ahead: prepared H.264 copies of the next episodes for a device that could not play the originals,
++/// the devices that needed them, and which client is currently being served a prepared file.
++/// </summary>
++public interface IPreparedMediaStore
++{
++    /// <summary>
++    /// Gets the folder prepared files live in.
++    /// </summary>
++    string Directory { get; }
++
++    /// <summary>
++    /// Gets the source to serve in place of <paramref name="original"/>, if a prepared file exists for it.
++    /// </summary>
++    /// <param name="original">The original media source (its id is the item id).</param>
++    /// <returns>The prepared source under the original's id, or <c>null</c>.</returns>
++    MediaSourceInfo? GetPreparedSource(MediaSourceInfo original);
++
++    /// <summary>
++    /// Remembers that <paramref name="clientIp"/> was told to direct play the prepared file of an item, or forgets it.
++    /// </summary>
++    /// <param name="clientIp">The client's normalized address.</param>
++    /// <param name="itemId">The item.</param>
++    /// <param name="active">Whether the client is being served the prepared file.</param>
++    void SetServing(string clientIp, Guid itemId, bool active);
++
++    /// <summary>
++    /// Gets the prepared source for a stream request, if that client was told to play it and the file still exists.
++    /// </summary>
++    /// <param name="clientIp">The client's normalized address.</param>
++    /// <param name="original">The original media source the request resolved to.</param>
++    /// <returns>The prepared source, or <c>null</c> to serve the original.</returns>
++    MediaSourceInfo? GetServing(string clientIp, MediaSourceInfo original);
++
++    /// <summary>
++    /// Records that a device had to transcode an episode for video reasons only.
++    /// </summary>
++    /// <param name="deviceId">The device.</param>
++    /// <param name="userId">The user.</param>
++    /// <param name="seriesId">The episode's series.</param>
++    /// <param name="signature">The video signature it could not play (<see cref="PreparedMedia.Signature"/>).</param>
++    void RecordTranscode(string deviceId, Guid userId, Guid seriesId, string signature);
++
++    /// <summary>
++    /// Gets the devices that transcoded within the given time.
++    /// </summary>
++    /// <param name="within">How far back to look.</param>
++    /// <returns>The device records.</returns>
++    IReadOnlyList<PreparedDeviceRecord> GetDevices(TimeSpan within);
++
++    /// <summary>
++    /// Gets the prepared files.
++    /// </summary>
++    /// <returns>Their stored info.</returns>
++    IReadOnlyList<PreparedMediaInfo> ListPrepared();
++
++    /// <summary>
++    /// Gets the path a prepared file for an item is stored at.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    /// <returns>The path.</returns>
++    string GetPreparedPath(Guid itemId);
++
++    /// <summary>
++    /// Stores the info of a finished prepared file.
++    /// </summary>
++    /// <param name="info">The info.</param>
++    void SavePrepared(PreparedMediaInfo info);
++
++    /// <summary>
++    /// Deletes a prepared file and its info.
++    /// </summary>
++    /// <param name="itemId">The item.</param>
++    void DeletePrepared(Guid itemId);
++}
+diff --git a/MediaBrowser.Controller/MediaEncoding/PreparedDeviceRecord.cs b/MediaBrowser.Controller/MediaEncoding/PreparedDeviceRecord.cs
+new file mode 100644
+index 0000000000..109e0f488e
+--- /dev/null
++++ b/MediaBrowser.Controller/MediaEncoding/PreparedDeviceRecord.cs
+@@ -0,0 +1,30 @@
++using System;
++using System.Collections.Generic;
++
++namespace MediaBrowser.Controller.MediaEncoding;
++
++/// <summary>
++/// A device that had to transcode episodes for video reasons, and the series it did that for.
++/// </summary>
++public sealed class PreparedDeviceRecord
++{
++    /// <summary>
++    /// Gets or sets the device id.
++    /// </summary>
++    public string DeviceId { get; set; } = string.Empty;
++
++    /// <summary>
++    /// Gets or sets the user who was watching.
++    /// </summary>
++    public Guid UserId { get; set; }
++
++    /// <summary>
++    /// Gets or sets when the device last transcoded (UTC).
++    /// </summary>
++    public DateTime LastSeen { get; set; }
++
++    /// <summary>
++    /// Gets or sets the video signature the device couldn't play, per series.
++    /// </summary>
++    public Dictionary<Guid, string> Series { get; set; } = [];
++}
+diff --git a/MediaBrowser.Controller/MediaEncoding/PreparedMedia.cs b/MediaBrowser.Controller/MediaEncoding/PreparedMedia.cs
+new file mode 100644
+index 0000000000..a544cd88c5
+--- /dev/null
++++ b/MediaBrowser.Controller/MediaEncoding/PreparedMedia.cs
+@@ -0,0 +1,214 @@
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.Linq;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.MediaInfo;
++using MediaBrowser.Model.Session;
++
++namespace MediaBrowser.Controller.MediaEncoding;
++
++/// <summary>
++/// The pure rules behind binge-ahead: which transcodes a prepared file can replace, how it is encoded,
++/// and when it is safe to serve in place of the original.
++/// </summary>
++public static class PreparedMedia
++{
++    /// <summary>
++    /// The transcode reasons a prepared file fixes. It re-encodes only the first video stream to 8-bit H.264
++    /// and copies everything else, so audio, subtitle and container reasons are not in this set.
++    /// </summary>
++    public const TranscodeReason VideoReasons =
++        TranscodeReason.VideoCodecNotSupported
++        | TranscodeReason.VideoProfileNotSupported
++        | TranscodeReason.VideoRangeTypeNotSupported
++        | TranscodeReason.VideoCodecTagNotSupported
++        | TranscodeReason.VideoLevelNotSupported
++        | TranscodeReason.VideoBitDepthNotSupported;
++
++    /// <summary>
++    /// The highest video bitrate a prepared file is encoded at.
++    /// </summary>
++    public const int MaxVideoBitrate = 8_000_000;
++
++    /// <summary>
++    /// The lowest video bitrate a prepared file is encoded at.
++    /// </summary>
++    public const int MinVideoBitrate = 2_000_000;
++
++    /// <summary>
++    /// Gets a value indicating whether every reason in <paramref name="reasons"/> is one a prepared file fixes.
++    /// </summary>
++    /// <param name="reasons">The transcode reasons of a playback decision.</param>
++    /// <returns><c>true</c> when the decision is a transcode caused by the video stream alone.</returns>
++    public static bool IsVideoOnly(TranscodeReason reasons)
++        => reasons != 0 && (reasons & ~VideoReasons) == 0;
++
++    /// <summary>
++    /// Gets a value indicating whether a playback decision for an original source is one a prepared file can replace:
++    /// not direct play, a transcode was planned, and only the video stream caused it.
++    /// </summary>
++    /// <param name="decided">The original source after the device-specific decision.</param>
++    /// <returns><c>true</c> when a prepared file should be offered instead.</returns>
++    public static bool IsReplaceable(MediaSourceInfo decided)
++        => !decided.SupportsDirectPlay
++            && decided.TranscodingUrl is not null
++            && IsVideoOnly(decided.TranscodeReasons);
++
++    /// <summary>
++    /// Gets the signature of a video stream: the properties that make a client unable to play it.
++    /// </summary>
++    /// <param name="video">The video stream.</param>
++    /// <returns>For example <c>hevc|10|SDR</c>.</returns>
++    public static string Signature(MediaStream video)
++        => string.Join(
++            '|',
++            (video.Codec ?? string.Empty).ToLowerInvariant(),
++            (video.BitDepth ?? 8).ToString(CultureInfo.InvariantCulture),
++            video.VideoRangeType.ToString());
++
++    /// <summary>
++    /// Gets a value indicating whether a prepared file can be made for this video: SDR only, since the
++    /// prepared encode does no tone mapping.
++    /// </summary>
++    /// <param name="video">The video stream.</param>
++    /// <returns><c>true</c> when it can be prepared.</returns>
++    public static bool CanPrepare(MediaStream video)
++        => video.VideoRange is VideoRange.SDR or VideoRange.Unknown
++            && video.VideoRangeType is VideoRangeType.SDR or VideoRangeType.Unknown;
++
++    /// <summary>
++    /// Gets the video bitrate to encode at: H.264 needs about 1.5x the bits of HEVC for the same picture.
++    /// </summary>
++    /// <param name="sourceVideoBitrate">The source video bitrate, if known.</param>
++    /// <returns>The bitrate in bits per second.</returns>
++    public static int TargetBitrate(int? sourceVideoBitrate)
++        => sourceVideoBitrate is > 0
++            ? Math.Clamp((int)Math.Min(int.MaxValue, sourceVideoBitrate.Value * 1.5), MinVideoBitrate, MaxVideoBitrate)
++            : 6_000_000;
++
++    /// <summary>
++    /// Builds the ffmpeg arguments. <c>-map 0 -c copy</c> keeps every stream at its index, so the audio and
++    /// subtitle indexes the client takes from the original item stay valid; only video stream 0 is re-encoded.
++    /// </summary>
++    /// <param name="inputPath">The original file.</param>
++    /// <param name="outputPath">The prepared file to write (Matroska).</param>
++    /// <param name="vaapiDevice">The VAAPI render node, or <c>null</c> to encode with libx264.</param>
++    /// <param name="videoBitrate">The target video bitrate.</param>
++    /// <returns>The arguments.</returns>
++    public static string BuildArguments(string inputPath, string outputPath, string? vaapiDevice, int videoBitrate)
++    {
++        var rate = videoBitrate.ToString(CultureInfo.InvariantCulture);
++        var buffer = (videoBitrate * 2L).ToString(CultureInfo.InvariantCulture);
++        var encoder = string.IsNullOrEmpty(vaapiDevice)
++            ? "-c:v:0 libx264 -preset veryfast -pix_fmt yuv420p -profile:v:0 high"
++            : "-c:v:0 h264_vaapi -vf:v:0 \"format=nv12,hwupload\" -rc_mode VBR";
++        var device = string.IsNullOrEmpty(vaapiDevice)
++            ? string.Empty
++            : $"-init_hw_device vaapi=va:{vaapiDevice} -filter_hw_device va ";
++
++        return $"-hide_banner -nostdin -loglevel error {device}-i \"{inputPath}\" -map 0 -c copy {encoder} "
++            + $"-b:v:0 {rate} -maxrate:v:0 {rate} -bufsize:v:0 {buffer} -max_muxing_queue_size 2048 -f matroska -y \"{outputPath}\"";
++    }
++
++    /// <summary>
++    /// Checks that the prepared file has the same streams at the same indexes as the original.
++    /// External streams (sidecar subtitle files) are not in either file and are ignored.
++    /// </summary>
++    /// <param name="original">The original's streams.</param>
++    /// <param name="prepared">The prepared file's probed streams.</param>
++    /// <returns><c>true</c> when every embedded stream lines up by index and type.</returns>
++    public static bool StreamLayoutMatches(IReadOnlyList<MediaStream> original, IReadOnlyList<MediaStream> prepared)
++    {
++        var embedded = original.Where(s => !s.IsExternal).OrderBy(s => s.Index).ToList();
++        var made = prepared.OrderBy(s => s.Index).ToList();
++        if (embedded.Count != made.Count)
++        {
++            return false;
++        }
++
++        for (var i = 0; i < embedded.Count; i++)
++        {
++            if (embedded[i].Index != made[i].Index || embedded[i].Type != made[i].Type)
++            {
++                return false;
++            }
++        }
++
++        return true;
++    }
++
++    /// <summary>
++    /// Builds the source served in place of the original: the original's identity and external streams,
++    /// with the prepared file's path and embedded streams.
++    /// </summary>
++    /// <param name="original">The original media source.</param>
++    /// <param name="preparedPath">The prepared file.</param>
++    /// <param name="prepared">The prepared file's probe result.</param>
++    /// <returns>The source.</returns>
++    public static MediaSourceInfo CreateSource(MediaSourceInfo original, string preparedPath, PreparedMediaInfo prepared)
++        => new MediaSourceInfo
++        {
++            Id = original.Id,
++            Name = original.Name,
++            ETag = original.ETag + "-prepared",
++            Path = preparedPath,
++            Protocol = MediaProtocol.File,
++            Type = original.Type,
++            Container = "mkv",
++            Size = prepared.Size,
++            Bitrate = prepared.Bitrate,
++            RunTimeTicks = original.RunTimeTicks,
++            VideoType = VideoType.VideoFile,
++            IsRemote = false,
++            SupportsDirectPlay = true,
++            SupportsDirectStream = original.SupportsDirectStream,
++            SupportsTranscoding = original.SupportsTranscoding,
++            SupportsProbing = false,
++            RequiresOpening = false,
++            DefaultAudioStreamIndex = original.DefaultAudioStreamIndex,
++            DefaultSubtitleStreamIndex = original.DefaultSubtitleStreamIndex,
++            MediaAttachments = original.MediaAttachments,
++            HasSegments = original.HasSegments,
++            MediaStreams = prepared.MediaStreams
++                .Concat(original.MediaStreams.Where(s => s.IsExternal))
++                .ToArray()
++        };
++
++    /// <summary>
++    /// Picks the episodes to prepare for one series: the first <paramref name="count"/> unplayed episodes after
++    /// the last played one whose video has <paramref name="signature"/> and can be prepared.
++    /// </summary>
++    /// <typeparam name="T">The episode type.</typeparam>
++    /// <param name="episodesInOrder">The series' episodes, in viewing order.</param>
++    /// <param name="isPlayed">Whether the user has played an episode.</param>
++    /// <param name="videoOf">The episode's first video stream, if any.</param>
++    /// <param name="signature">The signature the device could not play.</param>
++    /// <param name="count">How many to pick.</param>
++    /// <returns>The episodes, in viewing order.</returns>
++    public static IReadOnlyList<T> SelectNext<T>(
++        IReadOnlyList<T> episodesInOrder,
++        Func<T, bool> isPlayed,
++        Func<T, MediaStream?> videoOf,
++        string signature,
++        int count)
++    {
++        var lastPlayed = -1;
++        for (var i = 0; i < episodesInOrder.Count; i++)
++        {
++            if (isPlayed(episodesInOrder[i]))
++            {
++                lastPlayed = i;
++            }
++        }
++
++        return episodesInOrder
++            .Skip(lastPlayed + 1)
++            .Where(e => !isPlayed(e))
++            .Where(e => videoOf(e) is { } video && CanPrepare(video) && Signature(video) == signature)
++            .Take(count)
++            .ToList();
++    }
++}
+diff --git a/MediaBrowser.Controller/MediaEncoding/PreparedMediaInfo.cs b/MediaBrowser.Controller/MediaEncoding/PreparedMediaInfo.cs
+new file mode 100644
+index 0000000000..64e46654ff
+--- /dev/null
++++ b/MediaBrowser.Controller/MediaEncoding/PreparedMediaInfo.cs
+@@ -0,0 +1,36 @@
++using System;
++using System.Collections.Generic;
++using MediaBrowser.Model.Entities;
++
++namespace MediaBrowser.Controller.MediaEncoding;
++
++/// <summary>
++/// What is stored next to a prepared file: its probe result, so serving it needs no probe.
++/// </summary>
++public sealed class PreparedMediaInfo
++{
++    /// <summary>
++    /// Gets or sets the item the file was prepared for.
++    /// </summary>
++    public Guid ItemId { get; set; }
++
++    /// <summary>
++    /// Gets or sets when the file was prepared (UTC).
++    /// </summary>
++    public DateTime Created { get; set; }
++
++    /// <summary>
++    /// Gets or sets the file size in bytes.
++    /// </summary>
++    public long? Size { get; set; }
++
++    /// <summary>
++    /// Gets or sets the overall bitrate.
++    /// </summary>
++    public int? Bitrate { get; set; }
++
++    /// <summary>
++    /// Gets or sets the embedded streams, as probed.
++    /// </summary>
++    public IReadOnlyList<MediaStream> MediaStreams { get; set; } = [];
++}
+diff --git a/tests/Jellyfin.Controller.Tests/MediaEncoding/PreparedMediaTests.cs b/tests/Jellyfin.Controller.Tests/MediaEncoding/PreparedMediaTests.cs
+new file mode 100644
+index 0000000000..6e0d5d0726
+--- /dev/null
++++ b/tests/Jellyfin.Controller.Tests/MediaEncoding/PreparedMediaTests.cs
+@@ -0,0 +1,163 @@
++using System.Collections.Generic;
++using System.Linq;
++using Jellyfin.Data.Enums;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.MediaInfo;
++using MediaBrowser.Model.Session;
++using Xunit;
++
++namespace Jellyfin.Controller.Tests.MediaEncoding;
++
++public class PreparedMediaTests
++{
++    private static MediaStream Video(string codec = "hevc", int bitDepth = 10, string? transfer = null, int? dvProfile = null)
++        => new() { Type = MediaStreamType.Video, Index = 0, Codec = codec, BitDepth = bitDepth, ColorTransfer = transfer, ColorPrimaries = transfer is null ? null : "bt2020", CodecTag = dvProfile is null ? null : "dvhe", DvProfile = dvProfile };
++
++    private static List<MediaStream> Layout(params MediaStreamType[] types)
++        => types.Select((t, i) => new MediaStream { Type = t, Index = i }).ToList();
++
++    [Theory]
++    [InlineData(TranscodeReason.VideoProfileNotSupported, true)]
++    [InlineData(TranscodeReason.VideoCodecNotSupported | TranscodeReason.VideoBitDepthNotSupported, true)]
++    [InlineData(TranscodeReason.VideoProfileNotSupported | TranscodeReason.AudioCodecNotSupported, false)]
++    [InlineData(TranscodeReason.AudioCodecNotSupported, false)]
++    [InlineData(TranscodeReason.ContainerBitrateExceedsLimit, false)]
++    [InlineData((TranscodeReason)0, false)]
++    public void IsVideoOnly_OnlyVideoReasons(TranscodeReason reasons, bool expected)
++        => Assert.Equal(expected, PreparedMedia.IsVideoOnly(reasons));
++
++    [Fact]
++    public void IsReplaceable_NeedsAPlannedVideoOnlyTranscode()
++    {
++        var transcode = new MediaSourceInfo { SupportsDirectPlay = false, TranscodingUrl = "/videos/x/master.m3u8", TranscodeReasons = TranscodeReason.VideoProfileNotSupported };
++        Assert.True(PreparedMedia.IsReplaceable(transcode));
++
++        Assert.False(PreparedMedia.IsReplaceable(new MediaSourceInfo { SupportsDirectPlay = true, TranscodeReasons = TranscodeReason.VideoProfileNotSupported }));
++        Assert.False(PreparedMedia.IsReplaceable(new MediaSourceInfo { SupportsDirectPlay = false, TranscodingUrl = null, TranscodeReasons = TranscodeReason.VideoProfileNotSupported }));
++        Assert.False(PreparedMedia.IsReplaceable(new MediaSourceInfo { SupportsDirectPlay = false, TranscodingUrl = "/t", TranscodeReasons = TranscodeReason.AudioCodecNotSupported }));
++    }
++
++    [Fact]
++    public void Signature_IsCodecBitDepthAndRange()
++    {
++        Assert.Equal("hevc|10|SDR", PreparedMedia.Signature(Video()));
++        Assert.Equal("h264|8|SDR", PreparedMedia.Signature(new MediaStream { Type = MediaStreamType.Video, Codec = "H264" }));
++    }
++
++    [Fact]
++    public void CanPrepare_SdrOnly()
++    {
++        Assert.True(PreparedMedia.CanPrepare(Video()));
++        Assert.False(PreparedMedia.CanPrepare(Video(transfer: "smpte2084")));
++        Assert.False(PreparedMedia.CanPrepare(Video(dvProfile: 5)));
++    }
++
++    [Theory]
++    [InlineData(null, 6_000_000)]
++    [InlineData(1_000_000, PreparedMedia.MinVideoBitrate)]
++    [InlineData(3_000_000, 4_500_000)]
++    [InlineData(20_000_000, PreparedMedia.MaxVideoBitrate)]
++    public void TargetBitrate_IsOneAndAHalfTimesClamped(int? source, int expected)
++        => Assert.Equal(expected, PreparedMedia.TargetBitrate(source));
++
++    [Fact]
++    public void BuildArguments_Vaapi_CopiesEverythingButVideoZero()
++    {
++        var args = PreparedMedia.BuildArguments("/data/tv/a b.mkv", "/cache/prepared/x.mkv.part", "/dev/dri/renderD128", 4_500_000);
++
++        Assert.Contains("-init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va", args, System.StringComparison.Ordinal);
++        Assert.Contains("-i \"/data/tv/a b.mkv\" -map 0 -c copy -c:v:0 h264_vaapi", args, System.StringComparison.Ordinal);
++        Assert.Contains("-b:v:0 4500000 -maxrate:v:0 4500000 -bufsize:v:0 9000000", args, System.StringComparison.Ordinal);
++        Assert.EndsWith("-f matroska -y \"/cache/prepared/x.mkv.part\"", args, System.StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public void BuildArguments_NoVaapi_UsesLibx264()
++    {
++        var args = PreparedMedia.BuildArguments("/in.mkv", "/out.mkv", null, 6_000_000);
++
++        Assert.DoesNotContain("vaapi", args, System.StringComparison.Ordinal);
++        Assert.Contains("-map 0 -c copy -c:v:0 libx264", args, System.StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public void StreamLayoutMatches_SameTypesAtSameIndexes()
++    {
++        var original = Layout(MediaStreamType.Video, MediaStreamType.Audio, MediaStreamType.Subtitle, MediaStreamType.Subtitle);
++        original.Add(new MediaStream { Type = MediaStreamType.Subtitle, Index = 4, IsExternal = true });
++
++        Assert.True(PreparedMedia.StreamLayoutMatches(original, Layout(MediaStreamType.Video, MediaStreamType.Audio, MediaStreamType.Subtitle, MediaStreamType.Subtitle)));
++        Assert.False(PreparedMedia.StreamLayoutMatches(original, Layout(MediaStreamType.Video, MediaStreamType.Audio, MediaStreamType.Subtitle)));
++        Assert.False(PreparedMedia.StreamLayoutMatches(original, Layout(MediaStreamType.Video, MediaStreamType.Subtitle, MediaStreamType.Audio, MediaStreamType.Subtitle)));
++    }
++
++    [Fact]
++    public void CreateSource_KeepsTheOriginalIdentityAndDescribesThePreparedFile()
++    {
++        var external = new MediaStream { Type = MediaStreamType.Subtitle, Index = 2, IsExternal = true, Codec = "srt" };
++        var original = new MediaSourceInfo
++        {
++            Id = "6cb99322bd28e078fbd8491edd440259",
++            Name = "Original",
++            Path = "/data/tv/orig.mkv",
++            Container = "mkv",
++            Size = 900_000_000,
++            Bitrate = 2_500_000,
++            RunTimeTicks = 13_000_000_000,
++            DefaultAudioStreamIndex = 1,
++            MediaStreams = [Video(), new MediaStream { Type = MediaStreamType.Audio, Index = 1, Codec = "eac3" }, external]
++        };
++        var prepared = new PreparedMediaInfo
++        {
++            Size = 1_000_000_000,
++            Bitrate = 4_700_000,
++            MediaStreams = [Video("h264", 8), new MediaStream { Type = MediaStreamType.Audio, Index = 1, Codec = "eac3" }]
++        };
++
++        var source = PreparedMedia.CreateSource(original, "/cache/prepared/x.mkv", prepared);
++
++        Assert.Equal(original.Id, source.Id);
++        Assert.Equal("/cache/prepared/x.mkv", source.Path);
++        Assert.Equal(MediaProtocol.File, source.Protocol);
++        Assert.Equal("mkv", source.Container);
++        Assert.Equal(1_000_000_000, source.Size);
++        Assert.Equal(4_700_000, source.Bitrate);
++        Assert.Equal(original.RunTimeTicks, source.RunTimeTicks);
++        Assert.Equal(1, source.DefaultAudioStreamIndex);
++        Assert.Equal("h264", source.VideoStream.Codec);
++        Assert.Equal(3, source.MediaStreams.Count);
++        Assert.Same(external, source.MediaStreams[2]);
++        Assert.NotEqual(original.ETag, source.ETag);
++    }
++
++    [Fact]
++    public void SelectNext_TakesUnplayedAfterLastPlayedWithTheSignature()
++    {
++        // E09..E15 played (except a skipped E10), E16 HDR, E17..E19 SDR hevc10, E20 h264.
++        var episodes = new List<(int Number, bool Played, MediaStream Video)>
++        {
++            (9, true, Video()),
++            (10, false, Video()),
++            (15, true, Video()),
++            (16, false, Video(transfer: "smpte2084")),
++            (17, false, Video()),
++            (18, false, Video()),
++            (19, false, Video()),
++            (20, false, Video("h264", 8)),
++        };
++
++        var next = PreparedMedia.SelectNext(episodes, e => e.Played, e => e.Video, "hevc|10|SDR", 2);
++
++        Assert.Equal(new[] { 17, 18 }, next.Select(e => e.Number));
++    }
++
++    [Fact]
++    public void SelectNext_NothingPlayed_StartsAtTheBeginning()
++    {
++        var episodes = new List<(int Number, bool Played, MediaStream Video)> { (1, false, Video()), (2, false, Video()) };
++
++        Assert.Equal(new[] { 1 }, PreparedMedia.SelectNext(episodes, e => e.Played, e => e.Video, "hevc|10|SDR", 1).Select(e => e.Number));
++    }
++}
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
+new file mode 100644
+index 0000000000..3c1ef2fea4
+--- /dev/null
++++ b/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
+@@ -0,0 +1,131 @@
++using System;
++using System.IO;
++using System.Linq;
++using Emby.Server.Implementations.Library;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using Microsoft.Extensions.Logging.Abstractions;
++using Xunit;
++
++namespace Jellyfin.Server.Implementations.Tests.Library;
++
++public sealed class PreparedMediaStoreTests : IDisposable
++{
++    private readonly string _dir = Path.Combine(Path.GetTempPath(), "prepared-tests-" + Guid.NewGuid().ToString("N"));
++    private readonly Guid _itemId = Guid.NewGuid();
++    private DateTime _now = new(2026, 10, 3, 22, 0, 0, DateTimeKind.Utc);
++
++    public PreparedMediaStoreTests() => Directory.CreateDirectory(_dir);
++
++    public void Dispose() => Directory.Delete(_dir, true);
++
++    private PreparedMediaStore NewStore()
++        => new(Path.Combine(_dir, "prepared"), Path.Combine(_dir, "binge-ahead.json"), NullLogger<PreparedMediaStore>.Instance, () => _now);
++
++    private MediaSourceInfo Original()
++        => new()
++        {
++            Id = _itemId.ToString("N"),
++            Path = "/data/tv/orig.mkv",
++            MediaStreams = [new MediaStream { Type = MediaStreamType.Video, Index = 0, Codec = "hevc" }]
++        };
++
++    private void Prepare(PreparedMediaStore store)
++    {
++        store.SavePrepared(new PreparedMediaInfo
++        {
++            ItemId = _itemId,
++            Created = _now,
++            Size = 10,
++            MediaStreams = [new MediaStream { Type = MediaStreamType.Video, Index = 0, Codec = "h264" }]
++        });
++        File.WriteAllText(store.GetPreparedPath(_itemId), "x");
++    }
++
++    [Fact]
++    public void GetPreparedSource_NeedsBothFileAndInfo()
++    {
++        var store = NewStore();
++        Assert.Null(store.GetPreparedSource(Original()));
++
++        Prepare(store);
++        var source = store.GetPreparedSource(Original());
++        Assert.NotNull(source);
++        Assert.Equal(store.GetPreparedPath(_itemId), source!.Path);
++        Assert.Equal("h264", source.VideoStream.Codec);
++
++        File.Delete(store.GetPreparedPath(_itemId));
++        Assert.Null(store.GetPreparedSource(Original()));
++    }
++
++    [Fact]
++    public void GetServing_OnlyForTheClientThatWasToldAndOnlyWhileValid()
++    {
++        var store = NewStore();
++        Prepare(store);
++
++        Assert.Null(store.GetServing("192.168.1.50", Original()));
++
++        store.SetServing("192.168.1.50", _itemId, true);
++        Assert.NotNull(store.GetServing("192.168.1.50", Original()));
++        Assert.Null(store.GetServing("192.168.1.51", Original()));
++
++        // Another PlaybackInfo from the same client that did not choose the prepared file clears it.
++        store.SetServing("192.168.1.50", _itemId, false);
++        Assert.Null(store.GetServing("192.168.1.50", Original()));
++    }
++
++    [Fact]
++    public void GetServing_Expires()
++    {
++        var store = NewStore();
++        Prepare(store);
++        store.SetServing("192.168.1.50", _itemId, true);
++
++        _now += PreparedMediaStore.ServingLifetime + TimeSpan.FromMinutes(1);
++
++        Assert.Null(store.GetServing("192.168.1.50", Original()));
++    }
++
++    [Fact]
++    public void GetServing_FileEvictedFallsBackToOriginal()
++    {
++        var store = NewStore();
++        Prepare(store);
++        store.SetServing("192.168.1.50", _itemId, true);
++
++        store.DeletePrepared(_itemId);
++
++        Assert.Null(store.GetServing("192.168.1.50", Original()));
++        Assert.Empty(store.ListPrepared());
++    }
++
++    [Fact]
++    public void RecordTranscode_PersistsAndFiltersByAge()
++    {
++        var series = Guid.NewGuid();
++        var user = Guid.NewGuid();
++        NewStore().RecordTranscode("firetv", user, series, "hevc|10|SDR");
++
++        var reloaded = NewStore();
++        var device = Assert.Single(reloaded.GetDevices(TimeSpan.FromDays(14)));
++        Assert.Equal("firetv", device.DeviceId);
++        Assert.Equal(user, device.UserId);
++        Assert.Equal("hevc|10|SDR", device.Series[series]);
++
++        _now += TimeSpan.FromDays(15);
++        Assert.Empty(reloaded.GetDevices(TimeSpan.FromDays(14)));
++    }
++
++    [Fact]
++    public void ListPrepared_ReadsStoredInfo()
++    {
++        var store = NewStore();
++        Prepare(store);
++
++        var info = Assert.Single(store.ListPrepared());
++        Assert.Equal(_itemId, info.ItemId);
++        Assert.Equal(_now, info.Created);
++    }
++}
