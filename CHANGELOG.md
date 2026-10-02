@@ -8,8 +8,10 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p6`
 
 Base image moved to LinuxServer `12.1ubu2604-ls51` (jellyfin-ffmpeg8 8.1.3-1, libsqlite3-0 security update),
-plus the 28 functional `release-12.z` backports p5 did not carry (cherry-picked `-x`, so port-check drops them
-at 12.1.1). USER chose this scope ("B", team task 5 #174). Triage: team repo `jellyfin/server/upstream.md`.
+plus 15 `release-12.z` backports p5 did not carry (cherry-picked `-x`, so port-check drops them at 12.1.1).
+USER chose this scope (team task 5, #174/#191). 13 more were left out: 9 touch Jellyfin.Server or the
+Jellyfin.Database projects, which this build cannot ship (6 of them are migrations already applied here), and
+4 rating-table commits depend on one of those. All 13 arrive with 12.1.1. Triage: team repo `jellyfin/server/upstream.md`.
 
 ## 12.1-p5 — 2026-10-01
 
