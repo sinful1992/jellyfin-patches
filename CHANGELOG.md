@@ -8,6 +8,12 @@ gated and smoke-tested image.
 Base `v12.1` · image `jellyfin-patched:12.1-p6`
 Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls51@sha256:b0b6d034aa52ed6e1a76daaa3d7ed29039d2b802a50fa8ffd1d9fc8d3fd836c7`
 
+Base image moved to LinuxServer `12.1ubu2604-ls51` (jellyfin-ffmpeg8 8.1.3-1, libsqlite3-0 security update),
+plus 15 `release-12.z` backports p5 did not carry (cherry-picked `-x`, so port-check drops them at 12.1.1).
+USER chose this scope (team task 5, #174/#191). 13 more were left out: 9 touch Jellyfin.Server or the
+Jellyfin.Database projects, which this build cannot ship (6 of them are migrations already applied here), and
+4 rating-table commits depend on one of those. All 13 arrive with 12.1.1. Triage: team repo `jellyfin/server/upstream.md`.
+
 ### Added
 - Match artist creation lookups using CleanName (upstream `e647b23e9`)
 - Fix test concurrency (upstream `edab01622`)
@@ -76,16 +82,6 @@ Built on `lscr.io/linuxserver/jellyfin:12.1ubu2604-ls51@sha256:b0b6d034aa52ed6e1
 - Merge the hand-written 12.1-p5 changelog entry into the generated one
 
 Assemblies replaced: Emby.Naming.dll, Emby.Server.Implementations.dll, Jellyfin.Api.dll, Jellyfin.Server.Implementations.dll, MediaBrowser.Controller.dll, MediaBrowser.MediaEncoding.dll, MediaBrowser.Providers.dll
-
-## 12.1-p6 — 2026-10-02
-
-Base `v12.1` · image `jellyfin-patched:12.1-p6`
-
-Base image moved to LinuxServer `12.1ubu2604-ls51` (jellyfin-ffmpeg8 8.1.3-1, libsqlite3-0 security update),
-plus 15 `release-12.z` backports p5 did not carry (cherry-picked `-x`, so port-check drops them at 12.1.1).
-USER chose this scope (team task 5, #174/#191). 13 more were left out: 9 touch Jellyfin.Server or the
-Jellyfin.Database projects, which this build cannot ship (6 of them are migrations already applied here), and
-4 rating-table commits depend on one of those. All 13 arrive with 12.1.1. Triage: team repo `jellyfin/server/upstream.md`.
 
 ## 12.1-p5 — 2026-10-01
 
