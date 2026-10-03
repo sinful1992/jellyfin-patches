@@ -37,7 +37,7 @@ $(echo "$ships" | sed 's/^/    /')
 fi
 
 changelog="$(git show :CHANGELOG.md 2>/dev/null || cat CHANGELOG.md 2>/dev/null || true)"
-if ! echo "$changelog" | grep -qF "## ${version}"; then
+if ! grep -qF "## ${version}" <<<"$changelog"; then
   fail "CHANGELOG.md has no '## ${version}' entry, but this commit changes what ships.
   Add the entry (tools/release.py generates it) and stage CHANGELOG.md."
 fi
