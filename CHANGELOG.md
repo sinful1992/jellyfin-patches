@@ -3,6 +3,12 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.1-p8 — 2026-10-03
+
+**Binge-ahead: ignore device records with no user.** A record saved from a PlaybackInfo made with an API key has an
+empty user id, and the nightly task threw in `GetUserById` and prepared nothing (the first real run, 2026-10-03
+04:00, failed this way). Such records are no longer stored, and ones already on disk are skipped.
+
 ## 12.1-p7 — 2026-10-03
 
 Base `v12.1` · image `jellyfin-patched:12.1-p7`

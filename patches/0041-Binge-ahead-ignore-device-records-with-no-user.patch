@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sat, 3 Oct 2026 09:48:45 +0100
+Subject: [PATCH] Binge-ahead: ignore device records with no user
+
+A record with an empty user id (from a PlaybackInfo made with an API key)
+made the nightly task throw in GetUserById and skip every device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Library/PreparedMediaStore.cs                  |  9 ++++++++-
+ .../Library/PreparedMediaStoreTests.cs             | 14 ++++++++++++++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/Emby.Server.Implementations/Library/PreparedMediaStore.cs b/Emby.Server.Implementations/Library/PreparedMediaStore.cs
+index 982a1809fa..0886645a9b 100644
+--- a/Emby.Server.Implementations/Library/PreparedMediaStore.cs
++++ b/Emby.Server.Implementations/Library/PreparedMediaStore.cs
+@@ -5,6 +5,7 @@ using System.Globalization;
+ using System.IO;
+ using System.Linq;
+ using System.Text.Json;
++using Jellyfin.Extensions;
+ using Jellyfin.Extensions.Json;
+ using MediaBrowser.Common.Configuration;
+ using MediaBrowser.Controller.MediaEncoding;
+@@ -119,6 +120,12 @@ public sealed class PreparedMediaStore : IPreparedMediaStore
+     /// <inheritdoc />
+     public void RecordTranscode(string deviceId, Guid userId, Guid seriesId, string signature)
+     {
++        // An API key has no user, and the nightly task can only find episodes for a user.
++        if (userId.IsEmpty())
++        {
++            return;
++        }
++
+         lock (_devicesLock)
+         {
+             if (!_devices.TryGetValue(deviceId, out var record))
+@@ -140,7 +147,7 @@ public sealed class PreparedMediaStore : IPreparedMediaStore
+         lock (_devicesLock)
+         {
+             var since = _now() - within;
+-            return _devices.Values.Where(d => d.LastSeen >= since).ToList();
++            return _devices.Values.Where(d => d.LastSeen >= since && !d.UserId.IsEmpty()).ToList();
+         }
+     }
+ 
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
+index 3c1ef2fea4..80c8adaf2c 100644
+--- a/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
++++ b/tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
+@@ -118,6 +118,20 @@ public sealed class PreparedMediaStoreTests : IDisposable
+         Assert.Empty(reloaded.GetDevices(TimeSpan.FromDays(14)));
+     }
+ 
++    [Fact]
++    public void RecordTranscode_IgnoresAndHidesRecordsWithNoUser()
++    {
++        var series = Guid.NewGuid();
++        NewStore().RecordTranscode("apikey", Guid.Empty, series, "hevc|10|SDR");
++        Assert.Empty(NewStore().GetDevices(TimeSpan.FromDays(14)));
++
++        // A record saved by an older build without a user must not reach the nightly task.
++        File.WriteAllText(
++            Path.Combine(_dir, "binge-ahead.json"),
++            "[{\"DeviceId\":\"old\",\"UserId\":\"00000000000000000000000000000000\",\"LastSeen\":\"2026-10-03T21:00:00Z\",\"Series\":{}}]");
++        Assert.Empty(NewStore().GetDevices(TimeSpan.FromDays(14)));
++    }
++
+     [Fact]
+     public void ListPrepared_ReadsStoredInfo()
+     {
