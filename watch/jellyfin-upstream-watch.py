@@ -233,25 +233,28 @@ def check_paths(state, findings):
     since = since.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     seen = state.setdefault("seen_commits", [])
     paths = watched_paths(findings)
+    # Scanned in the local clone, not through the API: 45 paths x 2 branches is 90 requests
+    # against an anonymous limit of 60/hour, so from 2026-10-03 most of release-12.z came back
+    # 403 every day. `git log --since` filters on committer date like the API's `since` did.
+    r = _run(["git", "fetch", "--quiet", "origin", *WATCHED_BRANCHES], cwd=SRC_DIR)
+    if r.returncode != 0:
+        # Raised, not skipped: the scan window must not advance past commits never looked at.
+        raise RuntimeError(f"git fetch failed: {r.stderr.strip()[:300]}")
     for branch in WATCHED_BRANCHES:
         for path in paths:
-            try:
-                commits = get(
-                    "https://api.github.com/repos/jellyfin/jellyfin/commits"
-                    f"?path={urllib.parse.quote(path)}&sha={urllib.parse.quote(branch)}"
-                    f"&since={since}&per_page=50")
-            except urllib.error.HTTPError as e:
-                findings.append(f"could not scan `{path}` on `{branch}` ({e.code})")
+            r = _run(["git", "log", f"origin/{branch}", f"--since={since}",
+                      "--format=%H%x09%s", "--", path], cwd=SRC_DIR)
+            if r.returncode != 0:
+                findings.append(f"could not scan `{path}` on `{branch}` ({r.stderr.strip()[:120]})")
                 continue
-            for c in commits:
-                if c["sha"] in seen:
+            for line in r.stdout.splitlines():
+                sha, _, subject = line.partition("\t")
+                if sha in seen:
                     continue
-                seen.append(c["sha"])
-                subject = c["commit"]["message"].split("\n")[0]
+                seen.append(sha)
                 findings.append(
                     f"**{path.split('/')[-1]}** changed on `{branch}`\n"
-                    f"`{c['sha'][:9]}` {subject}")
-            time.sleep(1)  # stay well inside the anonymous rate limit
+                    f"`{sha[:9]}` {subject}")
     state["seen_commits"] = seen[-2000:]  # must outlast LOOKBACK on every watched path
     state["last_commit_scan"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
