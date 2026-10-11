@@ -3,6 +3,36 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.2-p1 — 2026-10-11
+
+Base `v12.2` · image `jellyfin-patched:12.2-p1`
+Built on `lscr.io/linuxserver/jellyfin:12.2ubu2604-ls53@sha256:1bb4f88d822a0510bb3604b68aacb80d77c1d2a30181e500090c65111b98723b`
+
+### Changed
+- Move the series to upstream v12.2 (84 upstream commits since v12.1, incl. a DB migration: `MakeOwnerIdIndexesPartial`)
+- Drop 28 release-12.z backports that v12.2 now ships
+- Fix SA1210 using order in ApplicationHost and DtoService
+
+<details><summary>Contains 13 change(s)</summary>
+
+- Add a stream-ticket authorization policy
+- Issue a stream ticket when playback info is requested
+- Require a stream ticket on the media endpoints
+- Add regression tests for media endpoint authentication
+- Batch the reads GetMediaSources repeats per item across a page of DTOs
+- Fetch a page's trickplay manifests with one query instead of one per media source
+- Fetch a page's chapters with one query instead of one per item
+- Persist stream tickets so a server restart does not revoke them
+- Only label Dolby Vision in HLS for clients that declared DOVI support
+- Prefer eac3/ac3 over aac when transcoding multichannel audio
+- Default resized images to quality 80 and pre-render the shapes clients ask for
+- Binge-ahead: serve a prepared H.264 copy of the next episodes to devices that can't play them
+- Binge-ahead: ignore device records with no user
+
+</details>
+
+Assemblies replaced: Emby.Server.Implementations.dll, Jellyfin.Api.dll, Jellyfin.Server.Implementations.dll, MediaBrowser.Controller.dll
+
 ## 12.1-p8 — 2026-10-03
 
 Base `v12.1` · image `jellyfin-patched:12.1-p8`

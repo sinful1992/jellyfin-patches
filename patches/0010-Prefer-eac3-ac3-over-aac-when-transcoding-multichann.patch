@@ -20,10 +20,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
  1 file changed, 16 insertions(+)
 
 diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
-index 6f010c0242..aef51a8070 100644
+index ebfa78176a..a31e69e19e 100644
 --- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
 +++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
-@@ -7601,6 +7601,22 @@ namespace MediaBrowser.Controller.MediaEncoding
+@@ -7643,6 +7643,22 @@ namespace MediaBrowser.Controller.MediaEncoding
                  audioCodecs.RemoveAt(0);
                  audioCodecs.Add(removed);
              }

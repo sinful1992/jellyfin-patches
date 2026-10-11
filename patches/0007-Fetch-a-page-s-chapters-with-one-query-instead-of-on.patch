@@ -19,7 +19,7 @@ single-item path is unchanged; IChapterManager and IChapterRepository
  3 files changed, 73 insertions(+), 5 deletions(-)
 
 diff --git a/Emby.Server.Implementations/Chapters/ChapterManager.cs b/Emby.Server.Implementations/Chapters/ChapterManager.cs
-index 69cbe533c6..6379724848 100644
+index 2938170d1b..750075e549 100644
 --- a/Emby.Server.Implementations/Chapters/ChapterManager.cs
 +++ b/Emby.Server.Implementations/Chapters/ChapterManager.cs
 @@ -5,6 +5,7 @@ using System.Linq;
@@ -30,7 +30,7 @@ index 69cbe533c6..6379724848 100644
  using MediaBrowser.Controller.Chapters;
  using MediaBrowser.Controller.Entities;
  using MediaBrowser.Controller.Entities.Audio;
-@@ -262,6 +263,22 @@ public class ChapterManager : IChapterManager
+@@ -269,6 +270,22 @@ public class ChapterManager : IChapterManager
          return _chapterRepository.GetChapters(baseItemId);
      }
  
@@ -54,17 +54,17 @@ index 69cbe533c6..6379724848 100644
      public async Task DeleteChapterDataAsync(Guid itemId, CancellationToken cancellationToken)
      {
 diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
-index afd6795ff3..65d1288f0c 100644
+index cdcd16e185..ff4cba3b51 100644
 --- a/Emby.Server.Implementations/Dto/DtoService.cs
 +++ b/Emby.Server.Implementations/Dto/DtoService.cs
-@@ -7,6 +7,7 @@ using System.Globalization;
+@@ -6,6 +6,7 @@ using System.Collections.Generic;
+ using System.Globalization;
  using System.IO;
  using System.Linq;
- using Jellyfin.Data;
 +using Emby.Server.Implementations.Chapters;
  using Emby.Server.Implementations.Library;
+ using Jellyfin.Data;
  using Jellyfin.Data.Enums;
- using Jellyfin.Database.Implementations.Entities;
 @@ -277,6 +278,13 @@ namespace Emby.Server.Implementations.Dto
                  }
              }

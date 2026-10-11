@@ -27,7 +27,7 @@ persistent form explicitly.
  create mode 100644 tests/Jellyfin.Api.Tests/Auth/StreamAccessPolicy/StreamTicketStoreTests.cs
 
 diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
-index 2cb119b87f..d4be59f641 100644
+index 83eb2a7276..128b6283a9 100644
 --- a/Emby.Server.Implementations/ApplicationHost.cs
 +++ b/Emby.Server.Implementations/ApplicationHost.cs
 @@ -636,7 +636,9 @@ namespace Emby.Server.Implementations

@@ -22,7 +22,7 @@ ITrickplayManager, which lives in MediaBrowser.Controller.
  2 files changed, 102 insertions(+), 5 deletions(-)
 
 diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
-index d8844b01ba..afd6795ff3 100644
+index f9c1f223f2..cdcd16e185 100644
 --- a/Emby.Server.Implementations/Dto/DtoService.cs
 +++ b/Emby.Server.Implementations/Dto/DtoService.cs
 @@ -13,6 +13,7 @@ using Jellyfin.Database.Implementations.Entities;
@@ -105,10 +105,10 @@ index d8844b01ba..afd6795ff3 100644
                          mediaStream => mediaStream.Key,
                          mediaStream => mediaStream.Value.ToDictionary(
 diff --git a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
-index 58b9f7f822..f5c71ec7c0 100644
+index 3c1164bffe..cb087a4ef4 100644
 --- a/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
 +++ b/Jellyfin.Server.Implementations/Trickplay/TrickplayManager.cs
-@@ -747,6 +747,83 @@ public partial class TrickplayManager : ITrickplayManager
+@@ -759,6 +759,83 @@ public partial class TrickplayManager : ITrickplayManager
          return trickplayManifest;
      }
  

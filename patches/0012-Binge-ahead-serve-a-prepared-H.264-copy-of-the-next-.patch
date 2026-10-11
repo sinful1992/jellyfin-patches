@@ -44,7 +44,7 @@ Prepared files are deleted once played or after 14 days, at most 4 kept.
  create mode 100644 tests/Jellyfin.Server.Implementations.Tests/Library/PreparedMediaStoreTests.cs
 
 diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
-index b35f1cb821..3ee904f2a7 100644
+index 8e334780ca..bb2cf30b86 100644
 --- a/Emby.Server.Implementations/ApplicationHost.cs
 +++ b/Emby.Server.Implementations/ApplicationHost.cs
 @@ -595,6 +595,7 @@ namespace Emby.Server.Implementations

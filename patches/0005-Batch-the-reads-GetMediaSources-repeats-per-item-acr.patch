@@ -38,14 +38,15 @@ test, and the readers already live in assemblies this fork replaces.
  create mode 100644 Jellyfin.Server.Implementations/Item/PagePrefetch.cs
 
 diff --git a/Emby.Server.Implementations/Dto/DtoService.cs b/Emby.Server.Implementations/Dto/DtoService.cs
-index e539508644..d8844b01ba 100644
+index e539508644..f9c1f223f2 100644
 --- a/Emby.Server.Implementations/Dto/DtoService.cs
 +++ b/Emby.Server.Implementations/Dto/DtoService.cs
-@@ -7,9 +7,12 @@ using System.Globalization;
+@@ -6,10 +6,13 @@ using System.Collections.Generic;
+ using System.Globalization;
  using System.IO;
  using System.Linq;
- using Jellyfin.Data;
 +using Emby.Server.Implementations.Library;
+ using Jellyfin.Data;
  using Jellyfin.Data.Enums;
  using Jellyfin.Database.Implementations.Entities;
  using Jellyfin.Extensions;
@@ -125,7 +126,7 @@ index e539508644..d8844b01ba 100644
          {
              var dto = GetBaseItemDtoInternal(item, options, user, owner, null);
 diff --git a/Emby.Server.Implementations/Library/LibraryManager.cs b/Emby.Server.Implementations/Library/LibraryManager.cs
-index caba304888..e9e3c20c73 100644
+index 16616dd328..44991dc373 100644
 --- a/Emby.Server.Implementations/Library/LibraryManager.cs
 +++ b/Emby.Server.Implementations/Library/LibraryManager.cs
 @@ -24,6 +24,7 @@ using Jellyfin.Data.Enums;
@@ -136,7 +137,7 @@ index caba304888..e9e3c20c73 100644
  using MediaBrowser.Common.Extensions;
  using MediaBrowser.Controller;
  using MediaBrowser.Controller.Configuration;
-@@ -2299,6 +2300,11 @@ namespace Emby.Server.Implementations.Library
+@@ -2298,6 +2299,11 @@ namespace Emby.Server.Implementations.Library
          {
              ArgumentNullException.ThrowIfNull(video);
  
@@ -148,7 +149,7 @@ index caba304888..e9e3c20c73 100644
              var linkedIds = _linkedChildrenService.GetLinkedChildrenIds(video.Id, (int)MediaBrowser.Controller.Entities.LinkedChildType.LocalAlternateVersion);
              if (linkedIds.Count > 0)
              {
-@@ -2313,7 +2319,9 @@ namespace Emby.Server.Implementations.Library
+@@ -2312,7 +2318,9 @@ namespace Emby.Server.Implementations.Library
          {
              ArgumentNullException.ThrowIfNull(video);
  
@@ -159,7 +160,7 @@ index caba304888..e9e3c20c73 100644
              if (linkedIds.Count > 0)
              {
                  return linkedIds
-@@ -2326,6 +2334,23 @@ namespace Emby.Server.Implementations.Library
+@@ -2325,6 +2333,23 @@ namespace Emby.Server.Implementations.Library
              return [];
          }
  

@@ -26,7 +26,7 @@ build already replaces.
  create mode 100644 Jellyfin.Api/Auth/StreamAccessPolicy/StreamTicketStore.cs
 
 diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
-index 1a54565863..2cb119b87f 100644
+index 1a54565863..83eb2a7276 100644
 --- a/Emby.Server.Implementations/ApplicationHost.cs
 +++ b/Emby.Server.Implementations/ApplicationHost.cs
 @@ -38,6 +38,7 @@ using Emby.Server.Implementations.Session;
@@ -37,14 +37,14 @@ index 1a54565863..2cb119b87f 100644
  using Jellyfin.Api.Helpers;
  using Jellyfin.Data;
  using Jellyfin.Database.Implementations.Enums;
-@@ -110,6 +111,7 @@ using MediaBrowser.XbmcMetadata.Providers;
+@@ -107,6 +108,7 @@ using MediaBrowser.Providers.Plugins.Tmdb.Movies;
+ using MediaBrowser.Providers.Plugins.Tmdb.TV;
+ using MediaBrowser.Providers.Subtitles;
+ using MediaBrowser.XbmcMetadata.Providers;
++using Microsoft.AspNetCore.Authorization;
  using Microsoft.AspNetCore.Http;
  using Microsoft.AspNetCore.Mvc;
  using Microsoft.Extensions.Configuration;
-+using Microsoft.AspNetCore.Authorization;
- using Microsoft.Extensions.DependencyInjection;
- using Microsoft.Extensions.Logging;
- using Prometheus.DotNetRuntime;
 @@ -629,6 +631,21 @@ namespace Emby.Server.Implementations
  
              serviceCollection.AddSingleton<ITranscodeManager, TranscodeManager>();

@@ -32,7 +32,7 @@ in the last 7 days, then halves the counts so old layouts fade out.
  create mode 100644 tests/Jellyfin.Server.Implementations.Tests/Images/ImageShapeTrackerTests.cs
 
 diff --git a/Emby.Server.Implementations/ApplicationHost.cs b/Emby.Server.Implementations/ApplicationHost.cs
-index d4be59f641..b35f1cb821 100644
+index 128b6283a9..8e334780ca 100644
 --- a/Emby.Server.Implementations/ApplicationHost.cs
 +++ b/Emby.Server.Implementations/ApplicationHost.cs
 @@ -24,6 +24,7 @@ using Emby.Server.Implementations.Data;
