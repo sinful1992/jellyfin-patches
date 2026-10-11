@@ -1,0 +1,543 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Sun, 11 Oct 2026 19:27:01 +0100
+Subject: [PATCH] Log where a video stream request spends its time before the
+ first byte
+
+Some direct-play starts on the Living Room TV hold the first full-file
+GET for ~9.3 s (normally 0.13 s) while PlaybackInfo stays at ~60 ms and
+the server log says nothing. A manual repro on 2026-09-28 showed the
+hold is before the first byte, i.e. server side, but not where.
+
+Every /Videos/{id}/stream request now logs one line when its response
+starts: total time to first byte, status, client address, Range, and
+the time spent in each phase -- ticket redemption, model binding, item
+lookup, static media sources, symlink resolution, each dynamic media
+source provider (timed individually; they run in parallel), media
+source attach, result, and first byte (file open + first read, inside
+PhysicalFileResult). Under 1 s it is Information; 1 s or more is
+Warning. Other ticketed routes (audio, HLS segments) log only when
+slow, to keep segment traffic out of the log. A request that never
+sends a byte logs at completion instead.
+
+The timer lives in HttpContext.Items and is made current through an
+AsyncLocal at the top of the action, so MediaSourceManager can mark its
+phases without a reference to the request; Mark/Note with no active
+timer are no-ops, so scans and PlaybackInfo pay nothing. It cannot be
+made current from the auth handler: a value set inside an awaited call
+does not flow back out (covered by a test).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Library/MediaSourceManager.cs             |   7 ++
+ .../StreamAccessPolicy/StreamAccessHandler.cs |   8 +-
+ Jellyfin.Api/Controllers/VideosController.cs  |   2 +
+ Jellyfin.Api/Helpers/StreamTiming.cs          | 118 +++++++++++++++++
+ Jellyfin.Api/Helpers/StreamingHelpers.cs      |   5 +
+ .../MediaEncoding/StreamRequestTimer.cs       | 119 ++++++++++++++++++
+ .../MediaEncoding/StreamRequestTimerTests.cs  | 100 +++++++++++++++
+ 7 files changed, 358 insertions(+), 1 deletion(-)
+ create mode 100644 Jellyfin.Api/Helpers/StreamTiming.cs
+ create mode 100644 MediaBrowser.Controller/MediaEncoding/StreamRequestTimer.cs
+ create mode 100644 tests/Jellyfin.Controller.Tests/MediaEncoding/StreamRequestTimerTests.cs
+
+diff --git a/Emby.Server.Implementations/Library/MediaSourceManager.cs b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+index f411531e00..749bf51f6f 100644
+--- a/Emby.Server.Implementations/Library/MediaSourceManager.cs
++++ b/Emby.Server.Implementations/Library/MediaSourceManager.cs
+@@ -6,6 +6,7 @@ using System;
+ using System.Collections.Concurrent;
+ using System.Collections.Generic;
+ using System.Collections.Immutable;
++using System.Diagnostics;
+ using System.Globalization;
+ using System.IO;
+ using System.Linq;
+@@ -231,7 +232,9 @@ namespace Emby.Server.Implementations.Library
+         public async Task<IReadOnlyList<MediaSourceInfo>> GetPlaybackMediaSources(BaseItem item, User user, bool allowMediaProbe, bool enablePathSubstitution, CancellationToken cancellationToken)
+         {
+             var mediaSources = GetStaticMediaSources(item, enablePathSubstitution, user);
++            StreamRequestTimer.Mark("static-sources");
+             ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
++            StreamRequestTimer.Mark("symlinks");
+ 
+             // If file is strm or main media stream is missing, force a metadata refresh with remote probing
+             if (allowMediaProbe && mediaSources[0].Type != MediaSourceType.Placeholder
+@@ -249,9 +252,11 @@ namespace Emby.Server.Implementations.Library
+ 
+                 mediaSources = GetStaticMediaSources(item, enablePathSubstitution, user);
+                 ResolveSymlinkPaths(mediaSources, enablePathSubstitution);
++                StreamRequestTimer.Mark("probe-refresh");
+             }
+ 
+             var dynamicMediaSources = await GetDynamicMediaSources(item, cancellationToken).ConfigureAwait(false);
++            StreamRequestTimer.Mark("dynamic-sources");
+ 
+             var list = new List<MediaSourceInfo>();
+ 
+@@ -364,9 +369,11 @@ namespace Emby.Server.Implementations.Library
+ 
+         private async Task<IEnumerable<MediaSourceInfo>> GetDynamicMediaSources(BaseItem item, IMediaSourceProvider provider, CancellationToken cancellationToken)
+         {
++            var started = Stopwatch.GetTimestamp();
+             try
+             {
+                 var sources = await provider.GetMediaSources(item, cancellationToken).ConfigureAwait(false);
++                StreamRequestTimer.Note(provider.GetType().Name, Stopwatch.GetElapsedTime(started));
+                 var list = sources.ToList();
+ 
+                 foreach (var mediaSource in list)
+diff --git a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
+index 79a7f0ffff..0e1a32509f 100644
+--- a/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
++++ b/Jellyfin.Api/Auth/StreamAccessPolicy/StreamAccessHandler.cs
+@@ -2,6 +2,7 @@ using System;
+ using System.Collections.Generic;
+ using System.Threading.Tasks;
+ using Jellyfin.Api.Extensions;
++using Jellyfin.Api.Helpers;
+ using Jellyfin.Extensions;
+ using MediaBrowser.Common.Extensions;
+ using Microsoft.AspNetCore.Authorization;
+@@ -53,23 +54,28 @@ namespace Jellyfin.Api.Auth.StreamAccessPolicy
+         {
+             ArgumentNullException.ThrowIfNull(context);
+ 
++            var httpContext = _httpContextAccessor.HttpContext;
++            var timer = httpContext is null ? null : StreamTiming.For(httpContext);
++
+             // A caller that did present credentials is treated like any other endpoint.
+             // DefaultAuthorizationHandler has already had its chance to Fail() this context
+             // on remote access or parental schedule, and that failure outranks this success.
+             if (context.User.GetIsApiKey() || !context.User.GetUserId().IsEmpty())
+             {
++                timer?.Add("auth");
+                 context.Succeed(requirement);
+                 return Task.CompletedTask;
+             }
+ 
+-            var httpContext = _httpContextAccessor.HttpContext;
+             if (httpContext is not null
+                 && _ticketStore.TryRedeem(httpContext.GetNormalizedRemoteIP(), GetCandidateIds(httpContext)))
+             {
++                timer?.Add("ticket");
+                 context.Succeed(requirement);
+                 return Task.CompletedTask;
+             }
+ 
++            timer?.Add("ticket-refused");
+             context.Fail();
+             return Task.CompletedTask;
+         }
+diff --git a/Jellyfin.Api/Controllers/VideosController.cs b/Jellyfin.Api/Controllers/VideosController.cs
+index 5b4d0fc9ee..24d726feb6 100644
+--- a/Jellyfin.Api/Controllers/VideosController.cs
++++ b/Jellyfin.Api/Controllers/VideosController.cs
+@@ -370,6 +370,7 @@ public class VideosController : BaseJellyfinApiController
+         [FromQuery] Dictionary<string, string> streamOptions,
+         [FromQuery] bool enableAudioVbrEncoding = true)
+     {
++        StreamTiming.Activate(HttpContext, alwaysLog: true);
+         var isHeadRequest = Request.Method == System.Net.WebRequestMethods.Http.Head;
+         // CTS lifecycle is managed internally.
+         var cancellationTokenSource = new CancellationTokenSource();
+@@ -477,6 +478,7 @@ public class VideosController : BaseJellyfinApiController
+                 return File(liveStream, contentType);
+             }
+ 
++            StreamRequestTimer.Mark("result");
+             return FileStreamResponseHelpers.GetStaticFileResult(
+                 state.MediaPath,
+                 contentType);
+diff --git a/Jellyfin.Api/Helpers/StreamTiming.cs b/Jellyfin.Api/Helpers/StreamTiming.cs
+new file mode 100644
+index 0000000000..2ced9dba07
+--- /dev/null
++++ b/Jellyfin.Api/Helpers/StreamTiming.cs
+@@ -0,0 +1,118 @@
++using System;
++using System.Globalization;
++using System.Threading.Tasks;
++using MediaBrowser.Common.Extensions;
++using MediaBrowser.Controller.MediaEncoding;
++using Microsoft.AspNetCore.Http;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging;
++
++namespace Jellyfin.Api.Helpers;
++
++/// <summary>
++/// Attaches a <see cref="StreamRequestTimer"/> to a media stream request and logs where the
++/// time to the first byte went.
++/// </summary>
++/// <remarks>
++/// Built for one question: some first GETs of a direct play hold for ~9 s before the client
++/// sees anything, while PlaybackInfo is fast and nothing else is logged. A video stream
++/// request always gets one line, so a slow start with no slow line here rules the server out
++/// as surely as a slow line rules it in. Other ticketed routes (audio, HLS segments) are
++/// logged only when slow, to keep segment traffic out of the log.
++/// </remarks>
++public static class StreamTiming
++{
++    private const string LoggerName = "Jellyfin.Api.Helpers.StreamTiming";
++    private static readonly object _itemsKey = new();
++    private static readonly object _alwaysLogKey = new();
++    private static readonly TimeSpan _slow = TimeSpan.FromSeconds(1);
++
++    /// <summary>
++    /// Gets the timer for this request, creating it on first use.
++    /// </summary>
++    /// <param name="httpContext">The request.</param>
++    /// <returns>The request's timer.</returns>
++    public static StreamRequestTimer For(HttpContext httpContext)
++    {
++        ArgumentNullException.ThrowIfNull(httpContext);
++
++        if (httpContext.Items.TryGetValue(_itemsKey, out var existing) && existing is StreamRequestTimer timer)
++        {
++            return timer;
++        }
++
++        timer = new StreamRequestTimer();
++        httpContext.Items[_itemsKey] = timer;
++        httpContext.Response.OnStarting(
++            static state =>
++            {
++                var (context, t) = ((HttpContext, StreamRequestTimer))state;
++                t.Add("first-byte");
++                Log(context, t, "first byte");
++                return Task.CompletedTask;
++            },
++            (httpContext, timer));
++        httpContext.Response.OnCompleted(
++            static state =>
++            {
++                var (context, t) = ((HttpContext, StreamRequestTimer))state;
++                if (!context.Response.HasStarted)
++                {
++                    t.Add("ended");
++                    Log(context, t, "no first byte");
++                }
++
++                return Task.CompletedTask;
++            },
++            (httpContext, timer));
++
++        return timer;
++    }
++
++    /// <summary>
++    /// Makes this request's timer the active one for the rest of the calling async flow, so
++    /// the library code it awaits can mark phases too.
++    /// </summary>
++    /// <param name="httpContext">The request.</param>
++    /// <param name="alwaysLog">Whether to log this request even when it is fast.</param>
++    public static void Activate(HttpContext httpContext, bool alwaysLog)
++    {
++        var timer = For(httpContext);
++        if (alwaysLog)
++        {
++            httpContext.Items[_alwaysLogKey] = true;
++        }
++
++        timer.Add("binding");
++        StreamRequestTimer.Current = timer;
++    }
++
++    private static void Log(HttpContext context, StreamRequestTimer timer, string outcome)
++    {
++        var elapsed = timer.Elapsed;
++        var slow = elapsed >= _slow;
++        if (!slow && !context.Items.ContainsKey(_alwaysLogKey))
++        {
++            return;
++        }
++
++        var logger = context.RequestServices.GetService<ILoggerFactory>()?.CreateLogger(LoggerName);
++        if (logger is null)
++        {
++            return;
++        }
++
++        logger.Log(
++            slow ? LogLevel.Warning : LogLevel.Information,
++            "Stream {Outcome} after {ElapsedMs} ms: {Method} {Path} {Status} from {RemoteIp} range {Range}, started {Started} local: {Phases}",
++            outcome,
++            elapsed.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture),
++            context.Request.Method,
++            context.Request.Path.Value,
++            context.Response.StatusCode,
++            context.GetNormalizedRemoteIP(),
++            context.Request.Headers.Range.ToString() is { Length: > 0 } range ? range : "none",
++            timer.StartedUtc.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture),
++            timer.Describe());
++    }
++}
+diff --git a/Jellyfin.Api/Helpers/StreamingHelpers.cs b/Jellyfin.Api/Helpers/StreamingHelpers.cs
+index eff913d58d..e821fdc041 100644
+--- a/Jellyfin.Api/Helpers/StreamingHelpers.cs
++++ b/Jellyfin.Api/Helpers/StreamingHelpers.cs
+@@ -109,6 +109,7 @@ public static class StreamingHelpers
+ 
+         var item = libraryManager.GetItemById<BaseItem>(streamingRequest.Id)
+             ?? throw new ResourceNotFoundException();
++        StreamRequestTimer.Mark("item");
+ 
+         state.IsInputVideo = item.MediaType == MediaType.Video;
+ 
+@@ -127,6 +128,7 @@ public static class StreamingHelpers
+             if (mediaSource is null)
+             {
+                 var mediaSources = await mediaSourceManager.GetPlaybackMediaSources(libraryManager.GetItemById<BaseItem>(streamingRequest.Id), null, false, false, cancellationToken).ConfigureAwait(false);
++                StreamRequestTimer.Mark("media-sources");
+ 
+                 mediaSource = string.IsNullOrEmpty(streamingRequest.MediaSourceId)
+                     ? mediaSources[0]
+@@ -145,6 +147,8 @@ public static class StreamingHelpers
+                 {
+                     mediaSource = prepared;
+                 }
++
++                StreamRequestTimer.Mark("binge-ahead");
+             }
+         }
+         else
+@@ -172,6 +176,7 @@ public static class StreamingHelpers
+         var encodingOptions = serverConfigurationManager.GetEncodingOptions();
+ 
+         encodingHelper.AttachMediaSourceInfo(state, encodingOptions, mediaSource, url);
++        StreamRequestTimer.Mark("attach");
+ 
+         string? containerInternal = Path.GetExtension(state.RequestedUrl);
+ 
+diff --git a/MediaBrowser.Controller/MediaEncoding/StreamRequestTimer.cs b/MediaBrowser.Controller/MediaEncoding/StreamRequestTimer.cs
+new file mode 100644
+index 0000000000..1834826638
+--- /dev/null
++++ b/MediaBrowser.Controller/MediaEncoding/StreamRequestTimer.cs
+@@ -0,0 +1,119 @@
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.Globalization;
++using System.Text;
++using System.Threading;
++
++namespace MediaBrowser.Controller.MediaEncoding;
++
++/// <summary>
++/// Times the phases of one media stream request, so a slow start can be attributed to a phase
++/// instead of guessed at.
++/// </summary>
++/// <remarks>
++/// The active timer rides an <see cref="AsyncLocal{T}"/>, so code below the API layer
++/// (the media source manager, its providers) marks its own phases without being handed the
++/// request. <see cref="Mark"/> with no active timer is a no-op, so the library code paths
++/// that also serve scans and PlaybackInfo pay nothing.
++/// </remarks>
++public sealed class StreamRequestTimer
++{
++    private static readonly AsyncLocal<StreamRequestTimer?> _current = new();
++
++    private readonly long _start = Stopwatch.GetTimestamp();
++    private readonly List<(string Phase, long Timestamp)> _marks = [];
++    private readonly List<string> _notes = [];
++    private readonly Lock _lock = new();
++
++    /// <summary>
++    /// Gets or sets the timer for the request running on the current async flow.
++    /// </summary>
++    public static StreamRequestTimer? Current
++    {
++        get => _current.Value;
++        set => _current.Value = value;
++    }
++
++    /// <summary>
++    /// Gets the wall-clock time the timer was created.
++    /// </summary>
++    public DateTime StartedUtc { get; } = DateTime.UtcNow;
++
++    /// <summary>
++    /// Gets the time elapsed since the timer was created.
++    /// </summary>
++    public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_start);
++
++    /// <summary>
++    /// Marks the end of a phase on the active timer, if there is one.
++    /// </summary>
++    /// <param name="phase">The phase that just finished.</param>
++    public static void Mark(string phase) => _current.Value?.Add(phase);
++
++    /// <summary>
++    /// Marks the end of a phase on this timer.
++    /// </summary>
++    /// <param name="phase">The phase that just finished.</param>
++    public void Add(string phase)
++    {
++        var now = Stopwatch.GetTimestamp();
++        lock (_lock)
++        {
++            _marks.Add((phase, now));
++        }
++    }
++
++    /// <summary>
++    /// Records something measured inside a phase, such as one of several media source
++    /// providers that run in parallel and so cannot be told apart by their marks.
++    /// </summary>
++    /// <param name="name">What was measured.</param>
++    /// <param name="elapsed">How long it took.</param>
++    public static void Note(string name, TimeSpan elapsed)
++    {
++        var timer = _current.Value;
++        if (timer is null)
++        {
++            return;
++        }
++
++        var text = name + " " + elapsed.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture);
++        lock (timer._lock)
++        {
++            timer._notes.Add(text);
++        }
++    }
++
++    /// <summary>
++    /// Describes the phases in order, each with the time it took since the previous mark.
++    /// </summary>
++    /// <returns>A string such as <c>auth 1, item 0, media-sources 9301, first-byte 4 (provider X 9298)</c>, in milliseconds.</returns>
++    public string Describe()
++    {
++        var sb = new StringBuilder();
++        lock (_lock)
++        {
++            var previous = _start;
++            foreach (var (phase, timestamp) in _marks)
++            {
++                if (sb.Length > 0)
++                {
++                    sb.Append(", ");
++                }
++
++                sb.Append(phase)
++                    .Append(' ')
++                    .Append(Stopwatch.GetElapsedTime(previous, timestamp).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture));
++                previous = timestamp;
++            }
++
++            if (_notes.Count > 0)
++            {
++                sb.Append(" (").AppendJoin(", ", _notes).Append(')');
++            }
++        }
++
++        return sb.ToString();
++    }
++}
+diff --git a/tests/Jellyfin.Controller.Tests/MediaEncoding/StreamRequestTimerTests.cs b/tests/Jellyfin.Controller.Tests/MediaEncoding/StreamRequestTimerTests.cs
+new file mode 100644
+index 0000000000..4b3bb2387f
+--- /dev/null
++++ b/tests/Jellyfin.Controller.Tests/MediaEncoding/StreamRequestTimerTests.cs
+@@ -0,0 +1,100 @@
++using System;
++using System.Linq;
++using System.Threading;
++using System.Threading.Tasks;
++using MediaBrowser.Controller.MediaEncoding;
++using Xunit;
++
++namespace Jellyfin.Controller.Tests.MediaEncoding;
++
++public class StreamRequestTimerTests
++{
++    [Fact]
++    public async Task Mark_WithoutActiveTimer_IsNoOp()
++    {
++        void Body()
++        {
++            StreamRequestTimer.Current = null;
++            StreamRequestTimer.Mark("orphan");
++            StreamRequestTimer.Note("orphan", TimeSpan.FromSeconds(1));
++            Assert.Null(StreamRequestTimer.Current);
++        }
++
++        await Task.Run(Body, TestContext.Current.CancellationToken);
++    }
++
++    [Fact]
++    public async Task Describe_ListsPhasesInOrder()
++    {
++        var timer = new StreamRequestTimer();
++
++        void Body()
++        {
++            StreamRequestTimer.Current = timer;
++            StreamRequestTimer.Mark("auth");
++            StreamRequestTimer.Mark("item");
++            StreamRequestTimer.Mark("first-byte");
++        }
++
++        await Task.Run(Body, TestContext.Current.CancellationToken);
++
++        var phases = timer.Describe().Split(", ").Select(p => p.Split(' ')[0]).ToArray();
++        Assert.Equal(new[] { "auth", "item", "first-byte" }, phases);
++    }
++
++    [Fact]
++    public async Task ActiveTimer_FlowsIntoAwaitedParallelWork()
++    {
++        // The media source manager runs its providers with Task.WhenAll, below the API layer;
++        // their notes only reach the request if the active timer flows into those tasks.
++        var ct = TestContext.Current.CancellationToken;
++        var timer = new StreamRequestTimer();
++
++        async Task ProviderA()
++        {
++            await Task.Yield();
++            StreamRequestTimer.Note("providerA", TimeSpan.FromMilliseconds(5));
++        }
++
++        async Task ProviderB()
++        {
++            await Task.Delay(1, ct);
++            StreamRequestTimer.Note("providerB", TimeSpan.FromMilliseconds(7));
++        }
++
++        async Task Request()
++        {
++            StreamRequestTimer.Current = timer;
++            await Task.WhenAll(Task.Run(ProviderA, ct), Task.Run(ProviderB, ct));
++            StreamRequestTimer.Mark("dynamic-sources");
++        }
++
++        await Task.Run(Request, ct);
++
++        var described = timer.Describe();
++        Assert.StartsWith("dynamic-sources ", described, StringComparison.Ordinal);
++        Assert.Contains("providerA 5", described, StringComparison.Ordinal);
++        Assert.Contains("providerB 7", described, StringComparison.Ordinal);
++    }
++
++    [Fact]
++    public async Task TimerSetInsideAwaitedCall_DoesNotLeakToCaller()
++    {
++        // Why the API layer keeps the timer in HttpContext.Items and re-activates it in the
++        // action: a value set inside an awaited call (the auth handler) is gone afterwards.
++        static async Task SetTimerAsync()
++        {
++            await Task.Yield();
++            StreamRequestTimer.Current = new StreamRequestTimer();
++        }
++
++        async Task Caller()
++        {
++            StreamRequestTimer.Current = null;
++            await SetTimerAsync();
++            Assert.Null(StreamRequestTimer.Current);
++        }
++
++        await Task.Run(Caller, TestContext.Current.CancellationToken);
++    }
++}

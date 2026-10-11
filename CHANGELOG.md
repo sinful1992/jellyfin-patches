@@ -8,12 +8,15 @@ gated and smoke-tested image.
 Base `v12.2` · image `jellyfin-patched:12.2-p1`
 Built on `lscr.io/linuxserver/jellyfin:12.2ubu2604-ls53@sha256:1bb4f88d822a0510bb3604b68aacb80d77c1d2a30181e500090c65111b98723b`
 
+### Added
+- Log where a video stream request spends its time before the first byte
+
 ### Changed
 - Move the series to upstream v12.2 (84 upstream commits since v12.1, incl. a DB migration: `MakeOwnerIdIndexesPartial`)
 - Drop 28 release-12.z backports that v12.2 now ships
 - Fix SA1210 using order in ApplicationHost and DtoService
 
-<details><summary>Contains 13 change(s)</summary>
+<details><summary>Contains 14 change(s)</summary>
 
 - Add a stream-ticket authorization policy
 - Issue a stream ticket when playback info is requested
@@ -28,6 +31,7 @@ Built on `lscr.io/linuxserver/jellyfin:12.2ubu2604-ls53@sha256:1bb4f88d822a0510b
 - Default resized images to quality 80 and pre-render the shapes clients ask for
 - Binge-ahead: serve a prepared H.264 copy of the next episodes to devices that can't play them
 - Binge-ahead: ignore device records with no user
+- Log where a video stream request spends its time before the first byte
 
 </details>
 
