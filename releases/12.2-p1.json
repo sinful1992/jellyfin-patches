@@ -1,0 +1,106 @@
+{
+  "version": "12.2-p1",
+  "released": "2026-10-11",
+  "base_tag": "v12.2",
+  "base_image": "lscr.io/linuxserver/jellyfin:12.2ubu2604-ls53@sha256:1bb4f88d822a0510bb3604b68aacb80d77c1d2a30181e500090c65111b98723b",
+  "image": "jellyfin-patched:12.2-p1",
+  "series_branch": "patched/12.2",
+  "series": [
+    {
+      "sha": "085eb2b8ba035bf9f26eff9cb49916670d64b261",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "2a8e7e7317e68c0a9478bd95a75f0424c81232a7",
+      "backport_of": null
+    },
+    {
+      "sha": "09f53efc81f9877dad7a839e81c03d3785e90dfc",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "95bdda6b35a1390d298264c8c011119f628e3679",
+      "backport_of": null
+    },
+    {
+      "sha": "0c32c8000159be0ab3b914df4d85136c416248c5",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "71c62579b4d9bfe532ef03b28d202f389ee804f9",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    },
+    {
+      "sha": "03ce84399efe3b2f841dd87a663c1bc9bf4dcb4e",
+      "subject": "Batch the reads GetMediaSources repeats per item across a page of DTOs",
+      "patch_id": "6d54e1bcaa8f786b51f945d11087f305430ee31a",
+      "backport_of": null
+    },
+    {
+      "sha": "fcde52e4120d1b55e3251dec2c82cabb11c6e6ec",
+      "subject": "Fetch a page's trickplay manifests with one query instead of one per media source",
+      "patch_id": "0a86c307ddab30bdb06cbc3dac1639d37ac8081c",
+      "backport_of": null
+    },
+    {
+      "sha": "7de81882dd92efc1daab46ab6c4eb515bb25bb07",
+      "subject": "Fetch a page's chapters with one query instead of one per item",
+      "patch_id": "fae0018910422d52e0ec5fbe016ceaa684e716a5",
+      "backport_of": null
+    },
+    {
+      "sha": "d795571ffe8690449d72a00789273d9061a32996",
+      "subject": "Persist stream tickets so a server restart does not revoke them",
+      "patch_id": "4ab42a585321090b0cb7e3c017b116fd47177fc1",
+      "backport_of": null
+    },
+    {
+      "sha": "057d69c02cb5be750f3cea86e2f847d39482277f",
+      "subject": "Only label Dolby Vision in HLS for clients that declared DOVI support",
+      "patch_id": "85cadb073aa1f2549a419fc127292f3d32c7307a",
+      "backport_of": null
+    },
+    {
+      "sha": "834537b35b15ef84f42faa4acecf2ac58e3a0d42",
+      "subject": "Prefer eac3/ac3 over aac when transcoding multichannel audio",
+      "patch_id": "d7fc57376b16dc649179132ba75ba140caf95625",
+      "backport_of": null
+    },
+    {
+      "sha": "1c71ade8f2354a9411c4afb2750185adbf5cd9f9",
+      "subject": "Default resized images to quality 80 and pre-render the shapes clients ask for",
+      "patch_id": "b161e0c6eed14d41ca7b29600c32d83a5272f105",
+      "backport_of": null
+    },
+    {
+      "sha": "da6e83d83983c8784f89e88b954c92ff609555b4",
+      "subject": "Binge-ahead: serve a prepared H.264 copy of the next episodes to devices that can't play them",
+      "patch_id": "5a10ea0f9de19cfba358def1ec1dfb695019d15a",
+      "backport_of": null
+    },
+    {
+      "sha": "c0a067326e66b3d673e68d286656eff3d2a60512",
+      "subject": "Binge-ahead: ignore device records with no user",
+      "patch_id": "4241930e6cee322277789e5eb1d8c3d49e86095f",
+      "backport_of": null
+    },
+    {
+      "sha": "d2318c6f76626d77fcf9d56ee5404ed0cee19750",
+      "subject": "Log where a video stream request spends its time before the first byte",
+      "patch_id": "0dc4934ad37a92cc64b7244a7ca781d7f1c7900e",
+      "backport_of": null
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll",
+    "Jellyfin.Server.Implementations.dll",
+    "MediaBrowser.Controller.dll"
+  ],
+  "tooling": [
+    "Log where a video stream request spends its time before the first byte (12.2-p1)",
+    "Move the series to 12.2 (12.2-p1)",
+    "watch: scan watched paths in the local clone, not the GitHub API"
+  ],
+  "repo_commit": "4b82780ff89f4480947934542a444c837c7546b3"
+}
