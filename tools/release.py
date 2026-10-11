@@ -127,6 +127,12 @@ def changelog_entry(man, prev):
     return "\n".join(lines)
 
 
+def existing_entry(text, version):
+    """The CHANGELOG entry already written for `version`, heading to the next heading, or None."""
+    m = re.search(rf"^## {re.escape(version)}(?=\s).*?(?=^## |\Z)", text, re.M | re.S)
+    return m.group(0).rstrip("\n") + "\n" if m else None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version")
@@ -186,13 +192,20 @@ def main():
     RELEASES.mkdir(exist_ok=True)
     (RELEASES / f"{version}.json").write_text(json.dumps(man, indent=2) + "\n")
 
-    entry = changelog_entry(man, load_previous(version))
     header = "# Changelog\n\nReleases of the local Jellyfin fork. Each entry is one built,\ngated and smoke-tested image.\n\n"
     old = CHANGELOG.read_text() if CHANGELOG.exists() else header
-    if not old.startswith("# Changelog"):
-        old = header + old
-    body = old[len(header):] if old.startswith(header) else old.split("\n\n", 1)[-1]
-    CHANGELOG.write_text(header + entry + "\n" + body.lstrip("\n"))
+    # The pre-commit hook won't take a series commit until CHANGELOG has a heading for
+    # VERSION, so an entry is usually written before the release is cut. Keep it: adding
+    # a generated one on top is how 12.1-p7 and 12.1-p8 each ended up listed twice.
+    entry = existing_entry(old, version)
+    if entry:
+        print(f"CHANGELOG already has a {version} entry -- keeping it")
+    else:
+        entry = changelog_entry(man, load_previous(version))
+        if not old.startswith("# Changelog"):
+            old = header + old
+        body = old[len(header):] if old.startswith(header) else old.split("\n\n", 1)[-1]
+        CHANGELOG.write_text(header + entry + "\n" + body.lstrip("\n"))
 
     # Everything, not just the release files: a change to build/ or tools/ is part of
     # what this release IS. Committing a subset would tag a tree that was never built.
