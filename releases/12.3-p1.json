@@ -1,0 +1,106 @@
+{
+  "version": "12.3-p1",
+  "released": "2026-10-23",
+  "base_tag": "v12.3",
+  "base_image": "lscr.io/linuxserver/jellyfin:12.3ubu2604-ls56@sha256:4212ca390fbc6bd5002048d2d2ce2b8a5b1ad278ec4cbabe6519869117404308",
+  "image": "jellyfin-patched:12.3-p1",
+  "series_branch": "patched/12.3",
+  "series": [
+    {
+      "sha": "fc316c4eaaab7efa8b926d2daefdff4018b15a84",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "2a8e7e7317e68c0a9478bd95a75f0424c81232a7",
+      "backport_of": null
+    },
+    {
+      "sha": "babc04e84dbd33e7f2fbce7c29d16da55c195d32",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "95bdda6b35a1390d298264c8c011119f628e3679",
+      "backport_of": null
+    },
+    {
+      "sha": "b84adeaa6ad9ec1cdd33c858dc084ea948372adc",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "4d9fdfe6a04c3a02b4b4c66b6fd1a42e0a816ad3",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    },
+    {
+      "sha": "f36df18a37552eb3b009038bc940d47f78b7abac",
+      "subject": "Batch the reads GetMediaSources repeats per item across a page of DTOs",
+      "patch_id": "6d54e1bcaa8f786b51f945d11087f305430ee31a",
+      "backport_of": null
+    },
+    {
+      "sha": "bbdc3fc5952869b199f967ea79c3e2f605b8be9b",
+      "subject": "Fetch a page's trickplay manifests with one query instead of one per media source",
+      "patch_id": "0a86c307ddab30bdb06cbc3dac1639d37ac8081c",
+      "backport_of": null
+    },
+    {
+      "sha": "0dbfd843a0ed010e3682c34bc30635dc6a2b55a7",
+      "subject": "Fetch a page's chapters with one query instead of one per item",
+      "patch_id": "fae0018910422d52e0ec5fbe016ceaa684e716a5",
+      "backport_of": null
+    },
+    {
+      "sha": "19c9d05d30612e7c63433a26e7775f301dbac729",
+      "subject": "Persist stream tickets so a server restart does not revoke them",
+      "patch_id": "4ab42a585321090b0cb7e3c017b116fd47177fc1",
+      "backport_of": null
+    },
+    {
+      "sha": "355c69029a3af2f7775fde68b067792cfaa5c159",
+      "subject": "Only label Dolby Vision in HLS for clients that declared DOVI support",
+      "patch_id": "85cadb073aa1f2549a419fc127292f3d32c7307a",
+      "backport_of": null
+    },
+    {
+      "sha": "af5095bb9f56012f7a1841e2d6524f86d314b255",
+      "subject": "Prefer eac3/ac3 over aac when transcoding multichannel audio",
+      "patch_id": "d7fc57376b16dc649179132ba75ba140caf95625",
+      "backport_of": null
+    },
+    {
+      "sha": "317801af8d4eabf063eea88f25ef23e035a32530",
+      "subject": "Default resized images to quality 80 and pre-render the shapes clients ask for",
+      "patch_id": "b161e0c6eed14d41ca7b29600c32d83a5272f105",
+      "backport_of": null
+    },
+    {
+      "sha": "364ba088ff179455eb2ac0ccd4dc07180a8cb38d",
+      "subject": "Binge-ahead: serve a prepared H.264 copy of the next episodes to devices that can't play them",
+      "patch_id": "5a10ea0f9de19cfba358def1ec1dfb695019d15a",
+      "backport_of": null
+    },
+    {
+      "sha": "5372770ffa04720ce6acd08ee30ff4edb2932097",
+      "subject": "Binge-ahead: ignore device records with no user",
+      "patch_id": "4241930e6cee322277789e5eb1d8c3d49e86095f",
+      "backport_of": null
+    },
+    {
+      "sha": "7642ee292a80830e9cc4589f9fdfb5aa96e5fac1",
+      "subject": "Log where a video stream request spends its time before the first byte",
+      "patch_id": "0dc4934ad37a92cc64b7244a7ca781d7f1c7900e",
+      "backport_of": null
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll",
+    "Jellyfin.Server.Implementations.dll",
+    "MediaBrowser.Controller.dll"
+  ],
+  "tooling": [
+    "Move the series to 12.3 (12.3-p1)",
+    "changelog: merge the duplicated 12.1-p7 and 12.1-p8 entries",
+    "release: keep a CHANGELOG entry that is already written"
+  ],
+  "repo_commit": "27ba7dea644559ab10e79f1c4d90c8390ae49a49"
+}
