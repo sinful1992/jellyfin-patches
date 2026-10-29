@@ -1,0 +1,104 @@
+{
+  "version": "12.4-p1",
+  "released": "2026-10-29",
+  "base_tag": "v12.4",
+  "base_image": "lscr.io/linuxserver/jellyfin:12.4ubu2604-ls57@sha256:3894d9eae88418d3cf9ac6349392d2c4dad818365a59565d19edc38098897044",
+  "image": "jellyfin-patched:12.4-p1",
+  "series_branch": "patched/12.4",
+  "series": [
+    {
+      "sha": "8df20a21e2011cc928c32fbb0eb51296d1572022",
+      "subject": "Add a stream-ticket authorization policy",
+      "patch_id": "2a8e7e7317e68c0a9478bd95a75f0424c81232a7",
+      "backport_of": null
+    },
+    {
+      "sha": "41bfa8fa171d53b874d1b1b4d57b208092be8075",
+      "subject": "Issue a stream ticket when playback info is requested",
+      "patch_id": "95bdda6b35a1390d298264c8c011119f628e3679",
+      "backport_of": null
+    },
+    {
+      "sha": "4451dfd70dbab98268e1bd2aca0d03d68ba1ef5e",
+      "subject": "Require a stream ticket on the media endpoints",
+      "patch_id": "9b7b22330f5dc2c5e5aa4c2277327befa29fab93",
+      "backport_of": null
+    },
+    {
+      "sha": "efe7856c42573e4ec198e2b85e41e5ea7f1bd7d8",
+      "subject": "Add regression tests for media endpoint authentication",
+      "patch_id": "d847310d775ee93fb221dc7bf6d747b9f324b41c",
+      "backport_of": null
+    },
+    {
+      "sha": "8c6ee49b52924edee8135d73bab1e9e28d314621",
+      "subject": "Batch the reads GetMediaSources repeats per item across a page of DTOs",
+      "patch_id": "6d54e1bcaa8f786b51f945d11087f305430ee31a",
+      "backport_of": null
+    },
+    {
+      "sha": "63c5c9f593e40e9650dc394647ce20aad37ef373",
+      "subject": "Fetch a page's trickplay manifests with one query instead of one per media source",
+      "patch_id": "0a86c307ddab30bdb06cbc3dac1639d37ac8081c",
+      "backport_of": null
+    },
+    {
+      "sha": "1ef7d66c99d131c8fdd52f8bcf31645d4798c6c4",
+      "subject": "Fetch a page's chapters with one query instead of one per item",
+      "patch_id": "fae0018910422d52e0ec5fbe016ceaa684e716a5",
+      "backport_of": null
+    },
+    {
+      "sha": "e5855d9d7cc3bc4eae7c22dd89ffb70e7090ac7d",
+      "subject": "Persist stream tickets so a server restart does not revoke them",
+      "patch_id": "4ab42a585321090b0cb7e3c017b116fd47177fc1",
+      "backport_of": null
+    },
+    {
+      "sha": "28a6313cd8325b646d9290e9172a287e24cbf59a",
+      "subject": "Only label Dolby Vision in HLS for clients that declared DOVI support",
+      "patch_id": "85cadb073aa1f2549a419fc127292f3d32c7307a",
+      "backport_of": null
+    },
+    {
+      "sha": "7cd1495643f9d5d0e13773f2c55765a713b6f4b2",
+      "subject": "Prefer eac3/ac3 over aac when transcoding multichannel audio",
+      "patch_id": "d7fc57376b16dc649179132ba75ba140caf95625",
+      "backport_of": null
+    },
+    {
+      "sha": "45d4b89b3185478b1475a493d1afe6adde0983cc",
+      "subject": "Default resized images to quality 80 and pre-render the shapes clients ask for",
+      "patch_id": "b161e0c6eed14d41ca7b29600c32d83a5272f105",
+      "backport_of": null
+    },
+    {
+      "sha": "aa30896845278e6dc6038b2e1adbe6debda5a6c5",
+      "subject": "Binge-ahead: serve a prepared H.264 copy of the next episodes to devices that can't play them",
+      "patch_id": "5a10ea0f9de19cfba358def1ec1dfb695019d15a",
+      "backport_of": null
+    },
+    {
+      "sha": "4fc9ca912db8424a08046d4a8f2d88a6d6d2873b",
+      "subject": "Binge-ahead: ignore device records with no user",
+      "patch_id": "4241930e6cee322277789e5eb1d8c3d49e86095f",
+      "backport_of": null
+    },
+    {
+      "sha": "d5fd5ffaa436bd3bd2cadd464b8549311bdb20c5",
+      "subject": "Log where a video stream request spends its time before the first byte",
+      "patch_id": "0dc4934ad37a92cc64b7244a7ca781d7f1c7900e",
+      "backport_of": null
+    }
+  ],
+  "assemblies": [
+    "Emby.Server.Implementations.dll",
+    "Jellyfin.Api.dll",
+    "Jellyfin.Server.Implementations.dll",
+    "MediaBrowser.Controller.dll"
+  ],
+  "tooling": [
+    "Move the series to 12.4 (12.4-p1)"
+  ],
+  "repo_commit": "eea169c9e4c95ef82e458a078b7e57d410d725a9"
+}
