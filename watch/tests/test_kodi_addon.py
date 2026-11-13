@@ -83,6 +83,50 @@ class KodiAddonCheck(unittest.TestCase):
         self.assertIn("views tweak", text)
         self.assertNotIn("Weblate", text)
 
+    def _merge_pr(self, files, msg):
+        git(self.up, "checkout", "-q", "-b", "pr")
+        commit(self.up, files, msg)
+        git(self.up, "checkout", "-q", "master")
+        commit(self.up, {"unrelated.txt": msg}, "keep master moving")  # forces a real merge commit
+        sha = git(self.up, "merge", "-q", "--no-ff", "-m", "Merge pull request: " + msg, "pr")
+        git(self.up, "branch", "-q", "-D", "pr")
+        return sha
+
+    def test_translation_pr_merge_is_quiet(self):
+        """ada #11274: a merge commit lists no files with `git show`; it must count by its PR."""
+        state = {}
+        self.run_check(state)
+        git(self.up, "checkout", "-q", "-b", "pr")
+        commit(self.up, {"resources/language/de/strings.po": "z\n"}, "Translated using Weblate")
+        git(self.up, "checkout", "-q", "master")
+        git(self.up, "merge", "-q", "--no-ff", "-m", "Merge pull request: weblate", "pr")
+        git(self.up, "branch", "-q", "-D", "pr")
+        self.assertEqual(self.run_check(state), [])
+        self.assertEqual(state["kodi_quiet_pending"], 1)
+
+    def test_pr_merge_touching_our_file_is_flagged_once(self):
+        state = {}
+        self.run_check(state)
+        self._merge_pr({"jellyfin_kodi/player.py": "pr\n"}, "player fix")
+        out = self.run_check(state)[0]
+        self.assertIn("Merge pull request: player fix -- touches ours: jellyfin_kodi/player.py", out)
+        self.assertEqual(out.count("player fix"), 1)  # the PR's own commit is not listed again
+
+    def test_rate_limited_release_call_moves_no_state(self):
+        state = {}
+        self.run_check(state)
+        commit(self.up, {"jellyfin_kodi/views.py": "w\n"}, "views tweak")
+
+        def limited(url):
+            raise RuntimeError("HTTP 403 rate limit")
+
+        self.w.get = limited
+        with self.assertRaises(RuntimeError):
+            self.run_check(state)
+        self.assertEqual(state["kodi_last_upstream"], self.base)
+        self.w.get = lambda url: self.releases
+        self.assertIn("views tweak", self.run_check(state)[0])
+
     def test_our_own_files_are_not_flagged(self):
         state = {}
         self.run_check(state)

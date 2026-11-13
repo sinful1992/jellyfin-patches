@@ -615,7 +615,12 @@ def _kodi_clone():
 
 
 def _kodi_files(sha):
-    return [f for f in _kodi_git("show", "--name-only", "--format=", sha).splitlines() if f]
+    """Files a first-parent commit changed. For a PR merge that is the whole PR: `git show` on a
+    merge lists nothing, so diff against the first parent instead (ada #11274)."""
+    parent = _run(["git", "rev-parse", "--verify", "--quiet", f"{sha}^1"], cwd=KODI_SRC_DIR)
+    if parent.returncode != 0:  # root commit
+        return [f for f in _kodi_git("show", "--name-only", "--format=", sha).splitlines() if f]
+    return [f for f in _kodi_git("diff", "--name-only", f"{sha}^1", sha).splitlines() if f]
 
 
 def check_kodi_addon(state, findings):
@@ -631,9 +636,14 @@ def check_kodi_addon(state, findings):
         f for f in _kodi_git("diff", "--name-only", base, f"refs/ours/{KODI_OURS_BRANCH}").splitlines()
         if f and not f.startswith(KODI_OURS_ONLY))
 
+    # Read before any state moves: a rate-limited API call then leaves this run unreported
+    # and the next run reports it, instead of half a run.
+    rels = [r for r in get(f"{KODI_API}/releases?per_page=10") if not r.get("draft")]
+
     last = state.get("kodi_last_upstream") or base
     new = [line.partition("\t") for line in
-           _kodi_git("log", "--reverse", "--format=%H%x09%s", f"{last}..{head}").splitlines() if line]
+           _kodi_git("log", "--first-parent", "--reverse", "--format=%H%x09%s", f"{last}..{head}").splitlines()
+           if line]
     if new:
         quiet, flagged, other = 0, [], []
         for sha, _, subject in new:
@@ -664,7 +674,6 @@ def check_kodi_addon(state, findings):
             state["kodi_quiet_pending"] = pending + quiet
     state["kodi_last_upstream"] = head
 
-    rels = [r for r in get(f"{KODI_API}/releases?per_page=10") if not r.get("draft")]
     if rels:
         tag = rels[0]["tag_name"]
         known = state.get("kodi_last_release")

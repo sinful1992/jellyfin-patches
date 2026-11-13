@@ -6,7 +6,7 @@ gated and smoke-tested image.
 ## Watcher — 2026-11-13
 
 ### Added
-- Bloodhound watches Jellyfin for Kodi too (`check_kodi_addon`, task 151): new upstream jellyfin-kodi releases, and new master commits since the last run, flagging every commit that touches a file our public copy (sinful1992/jellyfin-kodi `dev`) changed. The base is the merge-base of upstream master and our branch, read each run, so it follows our merges. Translation-only days post nothing; their count is added to the next post. Report only; merging stays manual. Mirror: `~/.local/state/jellyfin-watch/jellyfin-kodi.git` (bare, blob-less, made on first run). Tests: `python3 -m unittest discover -s watch/tests` (11).
+- Bloodhound watches Jellyfin for Kodi too (`check_kodi_addon`, task 151): new upstream jellyfin-kodi releases, and new master commits since the last run, flagging every commit that touches a file our public copy (sinful1992/jellyfin-kodi `dev`) changed. The base is the merge-base of upstream master and our branch, read each run, so it follows our merges. Translation-only days post nothing; their count is added to the next post. Report only; merging stays manual. Mirror: `~/.local/state/jellyfin-watch/jellyfin-kodi.git` (bare, blob-less, made on first run). Commits are read along the first-parent line, and a PR merge counts by its whole change set (`git diff sha^1 sha`), so each upstream PR is one line and a merged Weblate PR stays quiet (ada's review). Releases are read before any state moves, so a rate-limited API call leaves the run for the next day. Tests: `python3 -m unittest discover -s watch/tests` (14).
 
 ## 12.4-p1 — 2026-10-29
 
