@@ -3,6 +3,11 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## Watcher — 2026-11-13
+
+### Added
+- Bloodhound watches Jellyfin for Kodi too (`check_kodi_addon`, task 151): new upstream jellyfin-kodi releases, and new master commits since the last run, flagging every commit that touches a file our public copy (sinful1992/jellyfin-kodi `dev`) changed. The base is the merge-base of upstream master and our branch, read each run, so it follows our merges. Translation-only days post nothing; their count is added to the next post. Report only; merging stays manual. Mirror: `~/.local/state/jellyfin-watch/jellyfin-kodi.git` (bare, blob-less, made on first run). Tests: `python3 -m unittest discover -s watch/tests` (11).
+
 ## 12.4-p1 — 2026-10-29
 
 Base `v12.4` · image `jellyfin-patched:12.4-p1`

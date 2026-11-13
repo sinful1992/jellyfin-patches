@@ -578,6 +578,102 @@ def check_deployment(state, findings):
     state["last_deploy_state"] = key
 
 
+
+# --- Jellyfin for Kodi (our public copy sinful1992/jellyfin-kodi, task 151) -------------
+# Report only: new upstream jellyfin-kodi releases, and new upstream master commits since the
+# last run, flagging the ones that touch a file our copy changed. Merging stays a human step
+# (merge, run the add-on's tests, release our zip).
+KODI_UPSTREAM_URL = os.environ.get("KODI_UPSTREAM_URL", "https://github.com/jellyfin/jellyfin-kodi.git")
+KODI_OURS_URL = os.environ.get("KODI_OURS_URL", "https://github.com/sinful1992/jellyfin-kodi.git")
+KODI_OURS_BRANCH = os.environ.get("KODI_OURS_BRANCH", "dev")
+# The upstream commit our copy is built on: the merge-base of upstream master and our branch, read
+# at every run so it moves when we merge a newer upstream (ada #11271). KODI_BASE overrides.
+KODI_BASE = os.environ.get("KODI_BASE", "")
+KODI_SRC_DIR = Path(os.environ.get("KODI_SRC_DIR", Path.home() / ".local/state/jellyfin-watch/jellyfin-kodi.git"))
+KODI_API = os.environ.get("KODI_API", "https://api.github.com/repos/jellyfin/jellyfin-kodi")
+# Files whose upstream changes never need a merge decision of their own.
+KODI_QUIET = ("resources/language/",)
+# Our own files: changes on our side there are not "files we changed in upstream code".
+KODI_OURS_ONLY = ("CHANGELOG.md", "tests/")
+
+
+def _kodi_git(*args):
+    r = _run(["git", *args], cwd=KODI_SRC_DIR)
+    if r.returncode != 0:
+        # Raised, not skipped: the scan must not advance past commits never looked at.
+        raise RuntimeError(f"git {args[0]} failed: {r.stderr.strip()[:300]}")
+    return r.stdout
+
+
+def _kodi_clone():
+    if (KODI_SRC_DIR / "HEAD").exists():
+        return
+    KODI_SRC_DIR.parent.mkdir(parents=True, exist_ok=True)
+    r = _run(["git", "clone", "--bare", "--filter=blob:none", KODI_UPSTREAM_URL, str(KODI_SRC_DIR)])
+    if r.returncode != 0:
+        raise RuntimeError(f"git clone failed: {r.stderr.strip()[:300]}")
+
+
+def _kodi_files(sha):
+    return [f for f in _kodi_git("show", "--name-only", "--format=", sha).splitlines() if f]
+
+
+def check_kodi_addon(state, findings):
+    _kodi_clone()
+    _kodi_git("fetch", "--quiet", KODI_UPSTREAM_URL, "+refs/heads/master:refs/upstream/master")
+    _kodi_git("fetch", "--quiet", KODI_OURS_URL, f"+refs/heads/{KODI_OURS_BRANCH}:refs/ours/{KODI_OURS_BRANCH}")
+    head = _kodi_git("rev-parse", "refs/upstream/master").strip()
+    if KODI_BASE:
+        base = _kodi_git("rev-parse", f"{KODI_BASE}^{{commit}}").strip()
+    else:
+        base = _kodi_git("merge-base", head, f"refs/ours/{KODI_OURS_BRANCH}").strip()
+    ours = set(
+        f for f in _kodi_git("diff", "--name-only", base, f"refs/ours/{KODI_OURS_BRANCH}").splitlines()
+        if f and not f.startswith(KODI_OURS_ONLY))
+
+    last = state.get("kodi_last_upstream") or base
+    new = [line.partition("\t") for line in
+           _kodi_git("log", "--reverse", "--format=%H%x09%s", f"{last}..{head}").splitlines() if line]
+    if new:
+        quiet, flagged, other = 0, [], []
+        for sha, _, subject in new:
+            files = _kodi_files(sha)
+            hit = sorted(set(files) & ours)
+            if hit:
+                flagged.append(f"`{sha[:9]}` {subject} -- touches ours: {', '.join(hit)}")
+            elif files and all(f.startswith(KODI_QUIET) for f in files):
+                quiet += 1
+            else:
+                other.append(f"`{sha[:9]}` {subject}")
+        pending = state.get("kodi_quiet_pending", 0)
+        lines = [f"**jellyfin-kodi**: {len(new)} new upstream commit(s) on master since `{last[:9]}`"
+                 f" ({quiet} translation-only)."
+                 + (f" Plus {pending} translation-only since the last post." if pending else "")]
+        if flagged:
+            lines.append(f"Touch files our copy changed ({len(flagged)}) -- read before merging:")
+            lines += [f"- {x}" for x in flagged]
+        if other:
+            lines.append(f"Other ({len(other)}):")
+            lines += [f"- {x}" for x in other[:10]]
+            if len(other) > 10:
+                lines.append(f"- ... and {len(other) - 10} more")
+        if flagged or other:
+            findings.append("\n".join(lines))
+            state.pop("kodi_quiet_pending", None)
+        else:  # translation-only days stay quiet; their count rides on the next post
+            state["kodi_quiet_pending"] = pending + quiet
+    state["kodi_last_upstream"] = head
+
+    rels = [r for r in get(f"{KODI_API}/releases?per_page=10") if not r.get("draft")]
+    if rels:
+        tag = rels[0]["tag_name"]
+        known = state.get("kodi_last_release")
+        if known and tag != known:
+            findings.append(f"**jellyfin-kodi** released `{tag}` (was `{known}`): {rels[0].get('html_url', '')}\n"
+                            f"Our copy is based on `{base[:9]}`; merge it in by hand and run the add-on's tests.")
+        state["kodi_last_release"] = tag
+
+
 def main():
     state = load_state()
     findings = []
@@ -585,7 +681,8 @@ def main():
     for name, fn in (("release", check_release), ("base-image", check_base_image),
                      ("paths", check_paths),
                      ("issues", check_issues), ("intro-skipper", check_intro_skipper),
-                     ("port-check", check_port), ("deployment", check_deployment)):
+                     ("port-check", check_port), ("deployment", check_deployment),
+                     ("kodi-addon", check_kodi_addon)):
         try:
             fn(state, findings)
         except Exception as exc:  # a broken check must be loud, never silent
