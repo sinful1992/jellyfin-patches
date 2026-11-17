@@ -23,18 +23,21 @@ per 5 minutes, at most 2 reads run at once (more are skipped, not
 queued), and the per-file memory is capped at 4096 entries. Folders,
 .strm shortcuts, disc folders (BluRay/DVD), remote paths and virtual
 items are skipped. Log: "Prewarm <id> <ms> ms, <bytes> bytes, trigger
-item" at Debug, Information when it took 2 s or more.
+item" at Information (at most one line per file per 5 minutes).
 
 Tests: MediaPrewarmTests (16), UserLibraryControllerPrewarmTests (2,
-fail without the controller hook).
+fail without the controller hook); both share MediaPrewarm.Shared and
+run in one non-parallel collection.
 ---
  .../Controllers/UserLibraryController.cs      |   6 +
- Jellyfin.Api/Helpers/MediaPrewarm.cs          | 254 ++++++++++++++++++
- .../UserLibraryControllerPrewarmTests.cs      |  93 +++++++
- .../Helpers/MediaPrewarmTests.cs              | 181 +++++++++++++
- 4 files changed, 534 insertions(+)
+ Jellyfin.Api/Helpers/MediaPrewarm.cs          | 252 ++++++++++++++++++
+ .../UserLibraryControllerPrewarmTests.cs      |  95 +++++++
+ .../Helpers/MediaPrewarmSharedCollection.cs   |  12 +
+ .../Helpers/MediaPrewarmTests.cs              | 182 +++++++++++++
+ 5 files changed, 547 insertions(+)
  create mode 100644 Jellyfin.Api/Helpers/MediaPrewarm.cs
  create mode 100644 tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
+ create mode 100644 tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmSharedCollection.cs
  create mode 100644 tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
 
 diff --git a/Jellyfin.Api/Controllers/UserLibraryController.cs b/Jellyfin.Api/Controllers/UserLibraryController.cs
@@ -63,10 +66,10 @@ index da03032249..83403d334b 100644
          var dtoOptions = new DtoOptions();
 diff --git a/Jellyfin.Api/Helpers/MediaPrewarm.cs b/Jellyfin.Api/Helpers/MediaPrewarm.cs
 new file mode 100644
-index 0000000000..08f0edaf02
+index 0000000000..1f80041b51
 --- /dev/null
 +++ b/Jellyfin.Api/Helpers/MediaPrewarm.cs
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,252 @@
 +using System;
 +using System.Collections.Concurrent;
 +using System.Diagnostics;
@@ -107,8 +110,6 @@ index 0000000000..08f0edaf02
 +
 +    /// <summary>Shortest time between two reads of the same file.</summary>
 +    public static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
-+
-+    private static readonly TimeSpan _slow = TimeSpan.FromSeconds(2);
 +
 +    private readonly ConcurrentDictionary<string, DateTime> _lastWarm = new(StringComparer.Ordinal);
 +    private readonly Func<DateTime> _now;
@@ -189,8 +190,8 @@ index 0000000000..08f0edaf02
 +                    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
 +                    var bytes = await _read(path, cts.Token).ConfigureAwait(false);
 +                    watch.Stop();
-+                    logger?.Log(
-+                        watch.Elapsed >= _slow ? LogLevel.Information : LogLevel.Debug,
++                    // Information always: at most one line per file per 5 minutes, and the live check needs it.
++                    logger?.LogInformation(
 +                        "Prewarm {ItemId} {Ms} ms, {Bytes} bytes, trigger {Trigger}",
 +                        id.ToString("N", System.Globalization.CultureInfo.InvariantCulture),
 +                        (long)watch.Elapsed.TotalMilliseconds,
@@ -323,10 +324,10 @@ index 0000000000..08f0edaf02
 +}
 diff --git a/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs b/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
 new file mode 100644
-index 0000000000..b8537a914d
+index 0000000000..a4c02fb702
 --- /dev/null
 +++ b/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,95 @@
 +using System;
 +using System.Globalization;
 +using System.Security.Claims;
@@ -334,6 +335,7 @@ index 0000000000..b8537a914d
 +using Jellyfin.Api.Constants;
 +using Jellyfin.Api.Controllers;
 +using Jellyfin.Api.Helpers;
++using Jellyfin.Api.Tests.Helpers;
 +using Jellyfin.Database.Implementations.Entities;
 +using MediaBrowser.Controller.Dto;
 +using MediaBrowser.Controller.Entities;
@@ -354,6 +356,7 @@ index 0000000000..b8537a914d
 +/// <summary>
 +/// Opening a film's details page (GET /Items/{id}) starts the background read of its file (task 176).
 +/// </summary>
++[Collection(MediaPrewarmSharedCollection.Name)]
 +public class UserLibraryControllerPrewarmTests
 +{
 +    private readonly User _user = new("viewer", "auth", "reset") { Id = Guid.NewGuid() };
@@ -420,12 +423,30 @@ index 0000000000..b8537a914d
 +        Assert.False(MediaPrewarm.Shared.Claim(path));
 +    }
 +}
+diff --git a/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmSharedCollection.cs b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmSharedCollection.cs
+new file mode 100644
+index 0000000000..ea6099cccd
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmSharedCollection.cs
+@@ -0,0 +1,12 @@
++using Jellyfin.Api.Helpers;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Helpers
++{
++    /// <summary>Tests that use <see cref="MediaPrewarm.Shared"/> run one at a time (its 2 slots are global).</summary>
++    [CollectionDefinition(Name, DisableParallelization = true)]
++    public class MediaPrewarmSharedCollection
++    {
++        public const string Name = "MediaPrewarm.Shared";
++    }
++}
 diff --git a/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
 new file mode 100644
-index 0000000000..e32bb8002e
+index 0000000000..3a97582da0
 --- /dev/null
 +++ b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,182 @@
 +using System;
 +using System.IO;
 +using System.Threading;
@@ -442,6 +463,7 @@ index 0000000000..e32bb8002e
 +
 +namespace Jellyfin.Api.Tests.Helpers
 +{
++    [Collection(MediaPrewarmSharedCollection.Name)]
 +    public class MediaPrewarmTests
 +    {
 +        public MediaPrewarmTests()
