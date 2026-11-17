@@ -3,6 +3,11 @@
 Releases of the local Jellyfin fork. Each entry is one built,
 gated and smoke-tested image.
 
+## 12.4-p2 — unreleased (task 176)
+
+### Added
+- Wake a sleeping library disk when a video's item is fetched (patch 0015, task 176, USER #12984): GET /Items/{id} (and the legacy /Users/{userId}/Items/{id}) for a playable video backed by one local file reads 64 KiB at its start, middle and end in the background, so a NAS disk asleep after an hour without reads spins up while the viewer is still on the details page instead of after Play (2640 starts 11-04..11-17: 9.1 s / 13.3 s first byte per volume, 15 of 81 after >60 min idle, 0 of 306 after 5-30 min). Never delays or fails the request; once per file per 5 min; at most 2 at once (more skipped); per-file memory capped at 4096. Log `Prewarm <id> <ms> ms, <bytes> bytes, trigger item` (Debug; Information at >= 2 s). Tests: MediaPrewarmTests (16), UserLibraryControllerPrewarmTests (2, fail without the hook); Jellyfin.Api.Tests 191/191 with analyzers.
+
 ## Watcher — 2026-11-13
 
 ### Added

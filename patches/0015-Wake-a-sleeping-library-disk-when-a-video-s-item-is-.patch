@@ -1,0 +1,609 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sinful1992 <sinful1992@gmail.com>
+Date: Tue, 17 Nov 2026 10:04:09 +0000
+Subject: [PATCH] Wake a sleeping library disk when a video's item is fetched
+
+Whole-file stream starts on this server sometimes wait 9-13 s for the
+first byte. Over 2640 starts (11-04..11-17) the 21 slow ones are a fixed
+time per storage volume (9.1 s on one NAS volume, 13.3 s on the other),
+on every client, and come almost only after an hour or more with no
+reads on that volume: 15 of 81 starts after >60 min idle, 0 of 306 after
+5-30 min. The StreamTiming line (0014) puts all of it in the file open +
+first read. That is a sleeping disk spinning up.
+
+A viewer is on the details page for a few seconds before Play, and that
+page fetches the item (GET /Items/{id}, also the legacy
+/Users/{userId}/Items/{id}). When the item is a playable video backed by
+one local file, read 64 KiB at its start, middle and end in the
+background, so the disk spins up then instead of after Play.
+
+It never delays or fails the request: the read runs on the thread pool,
+errors are logged at Debug and dropped, each file is read at most once
+per 5 minutes, at most 2 reads run at once (more are skipped, not
+queued), and the per-file memory is capped at 4096 entries. Folders,
+.strm shortcuts, disc folders (BluRay/DVD), remote paths and virtual
+items are skipped. Log: "Prewarm <id> <ms> ms, <bytes> bytes, trigger
+item" at Debug, Information when it took 2 s or more.
+
+Tests: MediaPrewarmTests (16), UserLibraryControllerPrewarmTests (2,
+fail without the controller hook).
+---
+ .../Controllers/UserLibraryController.cs      |   6 +
+ Jellyfin.Api/Helpers/MediaPrewarm.cs          | 254 ++++++++++++++++++
+ .../UserLibraryControllerPrewarmTests.cs      |  93 +++++++
+ .../Helpers/MediaPrewarmTests.cs              | 181 +++++++++++++
+ 4 files changed, 534 insertions(+)
+ create mode 100644 Jellyfin.Api/Helpers/MediaPrewarm.cs
+ create mode 100644 tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
+ create mode 100644 tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
+
+diff --git a/Jellyfin.Api/Controllers/UserLibraryController.cs b/Jellyfin.Api/Controllers/UserLibraryController.cs
+index da03032249..83403d334b 100644
+--- a/Jellyfin.Api/Controllers/UserLibraryController.cs
++++ b/Jellyfin.Api/Controllers/UserLibraryController.cs
+@@ -23,6 +23,8 @@ using MediaBrowser.Model.Querying;
+ using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Http;
+ using Microsoft.AspNetCore.Mvc;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Logging;
+ 
+ namespace Jellyfin.Api.Controllers;
+ 
+@@ -100,6 +102,10 @@ public class UserLibraryController : BaseJellyfinApiController
+             return NotFound();
+         }
+ 
++        // A details page fetches its item before Play: wake a sleeping library disk now (background, at most
++        // once per file per 5 min; Home's refresh of the focused item lands here too).
++        _ = MediaPrewarm.Shared.TryStart(item, HttpContext?.RequestServices?.GetService<ILoggerFactory>(), "item");
++
+         await RefreshOnDemandIfNeeded(item).ConfigureAwait(false);
+ 
+         var dtoOptions = new DtoOptions();
+diff --git a/Jellyfin.Api/Helpers/MediaPrewarm.cs b/Jellyfin.Api/Helpers/MediaPrewarm.cs
+new file mode 100644
+index 0000000000..08f0edaf02
+--- /dev/null
++++ b/Jellyfin.Api/Helpers/MediaPrewarm.cs
+@@ -0,0 +1,254 @@
++using System;
++using System.Collections.Concurrent;
++using System.Diagnostics;
++using System.IO;
++using System.Threading;
++using System.Threading.Tasks;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Model.Entities;
++using Microsoft.Extensions.Logging;
++
++namespace Jellyfin.Api.Helpers;
++
++/// <summary>
++/// Reads a few blocks of a video's file in the background when its item is fetched, so a library disk
++/// that has gone to sleep is spinning again by the time the viewer presses Play.
++/// </summary>
++/// <remarks>
++/// Built for one pattern: whole-file stream starts that wait 9-13 s for the first byte, a fixed time per
++/// storage volume, almost only after an hour or more without reads on that volume (the StreamTiming line
++/// puts all of it in the file open + first read). That is a sleeping disk spinning up. A viewer looks at
++/// the details page for a few seconds before Play, and that page fetches the item, so the spin-up can
++/// happen then instead of after Play. The read never delays or fails the request that triggered it, each
++/// file is read at most once per <see cref="Interval"/>, and at most <see cref="MaxRunning"/> reads run
++/// at once; anything over that is skipped, not queued.
++/// </remarks>
++public sealed class MediaPrewarm
++{
++    /// <summary>Bytes read at each place in the file.</summary>
++    public const int BlockSize = 64 * 1024;
++
++    /// <summary>Most reads running at once.</summary>
++    public const int MaxRunning = 2;
++
++    /// <summary>Remembered files before old entries are dropped.</summary>
++    public const int MaxRemembered = 4096;
++
++    private const string LoggerName = "Jellyfin.Api.Helpers.MediaPrewarm";
++
++    /// <summary>Shortest time between two reads of the same file.</summary>
++    public static readonly TimeSpan Interval = TimeSpan.FromMinutes(5);
++
++    private static readonly TimeSpan _slow = TimeSpan.FromSeconds(2);
++
++    private readonly ConcurrentDictionary<string, DateTime> _lastWarm = new(StringComparer.Ordinal);
++    private readonly Func<DateTime> _now;
++    private readonly Func<string, CancellationToken, Task<long>> _read;
++    private int _running;
++
++    /// <summary>
++    /// Initializes a new instance of the <see cref="MediaPrewarm"/> class.
++    /// </summary>
++    /// <param name="now">Clock (UTC).</param>
++    /// <param name="read">Reads the blocks of a file; returns the bytes read.</param>
++    public MediaPrewarm(Func<DateTime>? now = null, Func<string, CancellationToken, Task<long>>? read = null)
++    {
++        _now = now ?? (() => DateTime.UtcNow);
++        _read = read ?? ReadBlocksAsync;
++    }
++
++    /// <summary>Gets the instance the API uses.</summary>
++    public static MediaPrewarm Shared { get; } = new();
++
++    /// <summary>Gets how many files are remembered (for tests).</summary>
++    public int RememberedCount => _lastWarm.Count;
++
++    /// <summary>
++    /// Whether an item is a playable video backed by one local file.
++    /// </summary>
++    /// <param name="item">The item.</param>
++    /// <returns>The file path, or <c>null</c> when there is nothing to warm.</returns>
++    public static string? FileToWarm(BaseItem? item)
++    {
++        if (item is not Video video
++            || video.IsFolder
++            || video.IsVirtualItem
++            || video.IsShortcut
++            || !video.IsFileProtocol
++            || video.VideoType != VideoType.VideoFile
++            || string.IsNullOrEmpty(video.Path))
++        {
++            return null;
++        }
++
++        return video.Path;
++    }
++
++    /// <summary>
++    /// Starts a background read of the item's file when the rules allow it. Never throws, never waits.
++    /// </summary>
++    /// <param name="item">The item that was fetched.</param>
++    /// <param name="loggerFactory">For the Prewarm line.</param>
++    /// <param name="trigger">What fetched the item, for the log line.</param>
++    /// <returns>The read, or <c>null</c> when skipped (for tests).</returns>
++    public Task? TryStart(BaseItem? item, ILoggerFactory? loggerFactory, string trigger)
++    {
++        try
++        {
++            var path = FileToWarm(item);
++            if (path is null || !Claim(path))
++            {
++                return null;
++            }
++
++            if (Interlocked.Increment(ref _running) > MaxRunning)
++            {
++                Interlocked.Decrement(ref _running);
++
++                // Busy: give the slot back so a later fetch can try again.
++                _lastWarm.TryRemove(path, out _);
++                return null;
++            }
++
++            var logger = loggerFactory?.CreateLogger(LoggerName);
++            var id = item!.Id;
++            return Task.Run(async () =>
++            {
++                var watch = Stopwatch.StartNew();
++                try
++                {
++                    using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
++                    var bytes = await _read(path, cts.Token).ConfigureAwait(false);
++                    watch.Stop();
++                    logger?.Log(
++                        watch.Elapsed >= _slow ? LogLevel.Information : LogLevel.Debug,
++                        "Prewarm {ItemId} {Ms} ms, {Bytes} bytes, trigger {Trigger}",
++                        id.ToString("N", System.Globalization.CultureInfo.InvariantCulture),
++                        (long)watch.Elapsed.TotalMilliseconds,
++                        bytes,
++                        trigger);
++                }
++                catch (Exception ex)
++                {
++                    logger?.LogDebug(ex, "Prewarm {ItemId} failed after {Ms} ms", id, (long)watch.Elapsed.TotalMilliseconds);
++                }
++                finally
++                {
++                    Interlocked.Decrement(ref _running);
++                }
++            });
++        }
++        catch (Exception)
++        {
++            return null;
++        }
++    }
++
++    /// <summary>
++    /// Takes the right to warm a file now; false when it was warmed less than <see cref="Interval"/> ago.
++    /// </summary>
++    /// <param name="path">The file.</param>
++    /// <returns>Whether to warm it.</returns>
++    public bool Claim(string path)
++    {
++        var now = _now();
++        while (true)
++        {
++            if (_lastWarm.TryGetValue(path, out var last))
++            {
++                // A clock that went back counts as expired, so a file is never locked out.
++                if (now - last < Interval && now >= last)
++                {
++                    return false;
++                }
++
++                if (_lastWarm.TryUpdate(path, now, last))
++                {
++                    return true;
++                }
++
++                continue;
++            }
++
++            if (_lastWarm.Count >= MaxRemembered)
++            {
++                Prune(now);
++            }
++
++            if (_lastWarm.TryAdd(path, now))
++            {
++                return true;
++            }
++        }
++    }
++
++    private void Prune(DateTime now)
++    {
++        foreach (var entry in _lastWarm)
++        {
++            if (now - entry.Value >= Interval || now < entry.Value)
++            {
++                _lastWarm.TryRemove(entry.Key, out _);
++            }
++        }
++
++        // Thousands of files fetched inside 5 minutes: forgetting them only means a second warm.
++        if (_lastWarm.Count >= MaxRemembered)
++        {
++            _lastWarm.Clear();
++        }
++    }
++
++    /// <summary>
++    /// Reads the first block (where playback starts), the last block (where a player looks for the
++    /// index) and one block in the middle (most likely not in the page cache, so it reaches the disk).
++    /// </summary>
++    /// <param name="path">The file.</param>
++    /// <param name="cancellationToken">Cancellation.</param>
++    /// <returns>Bytes read.</returns>
++    public static async Task<long> ReadBlocksAsync(string path, CancellationToken cancellationToken)
++    {
++        var buffer = new byte[BlockSize];
++        long total = 0;
++        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.Asynchronous);
++        await using (stream.ConfigureAwait(false))
++        {
++            var length = stream.Length;
++            foreach (var offset in BlockOffsets(length))
++            {
++                stream.Position = offset;
++                total += await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
++            }
++        }
++
++        return total;
++    }
++
++    /// <summary>
++    /// Where <see cref="ReadBlocksAsync"/> reads, for a file of a given length: start, middle, end;
++    /// duplicates dropped for small files.
++    /// </summary>
++    /// <param name="length">File length.</param>
++    /// <returns>Offsets, ascending.</returns>
++    public static long[] BlockOffsets(long length)
++    {
++        if (length <= 0)
++        {
++            return [];
++        }
++
++        if (length <= BlockSize)
++        {
++            return [0];
++        }
++
++        var last = length - BlockSize;
++        var middle = length / 2 / BlockSize * BlockSize;
++        if (middle <= 0 || middle >= last)
++        {
++            return [0, last];
++        }
++
++        return [0, middle, last];
++    }
++}
+diff --git a/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs b/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
+new file mode 100644
+index 0000000000..b8537a914d
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Controllers/UserLibraryControllerPrewarmTests.cs
+@@ -0,0 +1,93 @@
++using System;
++using System.Globalization;
++using System.Security.Claims;
++using System.Threading.Tasks;
++using Jellyfin.Api.Constants;
++using Jellyfin.Api.Controllers;
++using Jellyfin.Api.Helpers;
++using Jellyfin.Database.Implementations.Entities;
++using MediaBrowser.Controller.Dto;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.Movies;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Controller.Providers;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.IO;
++using MediaBrowser.Model.MediaInfo;
++using Microsoft.AspNetCore.Http;
++using Microsoft.AspNetCore.Mvc;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Controllers;
++
++/// <summary>
++/// Opening a film's details page (GET /Items/{id}) starts the background read of its file (task 176).
++/// </summary>
++public class UserLibraryControllerPrewarmTests
++{
++    private readonly User _user = new("viewer", "auth", "reset") { Id = Guid.NewGuid() };
++    private readonly Mock<ILibraryManager> _library = new();
++    private readonly UserLibraryController _subject;
++
++    public UserLibraryControllerPrewarmTests()
++    {
++        var sources = new Mock<IMediaSourceManager>();
++        sources.Setup(m => m.GetPathProtocol(It.IsAny<string>())).Returns(MediaProtocol.File);
++        BaseItem.MediaSourceManager = sources.Object;
++
++        var users = new Mock<IUserManager>();
++        users.Setup(m => m.GetUserById(_user.Id)).Returns(_user);
++        var dto = new Mock<IDtoService>();
++        dto.Setup(m => m.GetBaseItemDto(It.IsAny<BaseItem>(), It.IsAny<DtoOptions>(), It.IsAny<User>(), It.IsAny<BaseItem>()))
++            .Returns(new BaseItemDto());
++
++        _subject = new UserLibraryController(
++            users.Object,
++            Mock.Of<IUserDataManager>(),
++            _library.Object,
++            dto.Object,
++            Mock.Of<IUserViewManager>(),
++            Mock.Of<IFileSystem>(),
++            Mock.Of<IProviderManager>());
++
++        var claims = new[]
++        {
++            new Claim(InternalClaimTypes.UserId, _user.Id.ToString("N", CultureInfo.InvariantCulture)),
++            new Claim(InternalClaimTypes.IsApiKey, bool.FalseString),
++        };
++        _subject.ControllerContext = new ControllerContext
++        {
++            HttpContext = new DefaultHttpContext { User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test")) }
++        };
++    }
++
++    [Fact]
++    public async Task GetItem_Film_ClaimsItsFileForAWarm()
++    {
++        var path = "/nonexistent/task176/" + Guid.NewGuid().ToString("N") + ".mkv";
++        var film = new Movie { Id = Guid.NewGuid(), Path = path, VideoType = VideoType.VideoFile };
++        _library.Setup(m => m.GetItemById<BaseItem>(film.Id, _user)).Returns(film);
++
++        var result = await _subject.GetItem(null, film.Id);
++
++        Assert.NotNull(result.Value);
++        // The fetch already took this file's slot, so a second claim inside 5 minutes is refused.
++        Assert.False(MediaPrewarm.Shared.Claim(path));
++    }
++
++    [Fact]
++    public async Task GetItem_LegacyRoute_AlsoWarms()
++    {
++        var path = "/nonexistent/task176/" + Guid.NewGuid().ToString("N") + ".mkv";
++        var film = new Movie { Id = Guid.NewGuid(), Path = path, VideoType = VideoType.VideoFile };
++        _library.Setup(m => m.GetItemById<BaseItem>(film.Id, _user)).Returns(film);
++
++#pragma warning disable CS0618 // legacy route kept for older clients
++        await _subject.GetItemLegacy(_user.Id, film.Id);
++#pragma warning restore CS0618
++
++        Assert.False(MediaPrewarm.Shared.Claim(path));
++    }
++}
+diff --git a/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
+new file mode 100644
+index 0000000000..e32bb8002e
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Helpers/MediaPrewarmTests.cs
+@@ -0,0 +1,181 @@
++using System;
++using System.IO;
++using System.Threading;
++using System.Threading.Tasks;
++using Jellyfin.Api.Helpers;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Entities.Movies;
++using MediaBrowser.Controller.Entities.TV;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Model.Entities;
++using MediaBrowser.Model.MediaInfo;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Helpers
++{
++    public class MediaPrewarmTests
++    {
++        public MediaPrewarmTests()
++        {
++            var sources = new Mock<IMediaSourceManager>();
++            sources.Setup(m => m.GetPathProtocol(It.IsAny<string>()))
++                .Returns<string>(p => p.StartsWith("http", StringComparison.Ordinal) ? MediaProtocol.Http : MediaProtocol.File);
++            BaseItem.MediaSourceManager = sources.Object;
++        }
++
++        private static Movie Film(string path = "/data/movies/a.mkv") => new() { Id = Guid.NewGuid(), Path = path, VideoType = VideoType.VideoFile };
++
++        [Fact]
++        public void FileToWarm_FilmAndEpisode()
++        {
++            Assert.Equal("/data/movies/a.mkv", MediaPrewarm.FileToWarm(Film()));
++            Assert.Equal("/data/tv/e.mkv", MediaPrewarm.FileToWarm(new Episode { Path = "/data/tv/e.mkv", VideoType = VideoType.VideoFile }));
++        }
++
++        [Fact]
++        public void FileToWarm_SkipsWhatIsNotOneLocalFile()
++        {
++            Assert.Null(MediaPrewarm.FileToWarm(null));
++            Assert.Null(MediaPrewarm.FileToWarm(new Series { Path = "/data/tv/show" }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Folder { Path = "/data/movies" }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Movie { Path = "/data/movies/disc", VideoType = VideoType.BluRay }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Movie { Path = "/data/movies/a.strm", VideoType = VideoType.VideoFile, IsShortcut = true }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Movie { Path = "https://example.invalid/a.mkv", VideoType = VideoType.VideoFile }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Movie { Path = string.Empty, VideoType = VideoType.VideoFile }));
++            Assert.Null(MediaPrewarm.FileToWarm(new Episode { Path = "/data/tv/missing.mkv", VideoType = VideoType.VideoFile, IsVirtualItem = true }));
++        }
++
++        [Fact]
++        public void Claim_OncePerInterval_PerFile()
++        {
++            var now = new DateTime(2026, 11, 17, 9, 0, 0, DateTimeKind.Utc);
++            var p = new MediaPrewarm(() => now, (_, _) => Task.FromResult(0L));
++            Assert.True(p.Claim("/a"));
++            Assert.False(p.Claim("/a"));
++            Assert.True(p.Claim("/b"), "another file is independent");
++            now = now.AddMinutes(4).AddSeconds(59);
++            Assert.False(p.Claim("/a"));
++            now = now.AddSeconds(1);
++            Assert.True(p.Claim("/a"), "5 min later it may warm again");
++        }
++
++        [Fact]
++        public void Claim_ClockGoingBack_DoesNotLockTheFileOut()
++        {
++            var now = new DateTime(2026, 11, 17, 9, 0, 0, DateTimeKind.Utc);
++            var p = new MediaPrewarm(() => now, (_, _) => Task.FromResult(0L));
++            Assert.True(p.Claim("/a"));
++            now = now.AddHours(-2);
++            Assert.True(p.Claim("/a"));
++        }
++
++        [Fact]
++        public void Claim_ManyFiles_StaysBounded()
++        {
++            var now = new DateTime(2026, 11, 17, 9, 0, 0, DateTimeKind.Utc);
++            var p = new MediaPrewarm(() => now, (_, _) => Task.FromResult(0L));
++            for (var i = 0; i < MediaPrewarm.MaxRemembered * 2; i++)
++            {
++                Assert.True(p.Claim("/f" + i));
++            }
++
++            Assert.True(p.RememberedCount <= MediaPrewarm.MaxRemembered);
++
++            // A file seen just now is still known, so it is not warmed twice.
++            Assert.False(p.Claim("/f" + ((MediaPrewarm.MaxRemembered * 2) - 1)));
++
++            // Old entries are pruned first: 5 min later the map makes room without forgetting new ones.
++            now = now.AddMinutes(6);
++            Assert.True(p.Claim("/new"));
++            Assert.False(p.Claim("/new"));
++        }
++
++        [Fact]
++        public async Task TryStart_RunsOnce_AndNeverThrowsFromTheRead()
++        {
++            var calls = 0;
++            var p = new MediaPrewarm(read: (_, _) =>
++            {
++                Interlocked.Increment(ref calls);
++                throw new IOException("NAS gone");
++            });
++            var film = Film();
++            var t = p.TryStart(film, null, "item");
++            Assert.NotNull(t);
++            await t!;
++            Assert.Null(p.TryStart(film, null, "item"));
++            Assert.Equal(1, calls);
++        }
++
++        [Fact]
++        public void TryStart_SkipsWhenTwoAreRunning_AndDoesNotWait()
++        {
++            var gate = new TaskCompletionSource<long>();
++            var p = new MediaPrewarm(read: (_, _) => gate.Task);
++            Assert.NotNull(p.TryStart(Film("/1"), null, "item"));
++            Assert.NotNull(p.TryStart(Film("/2"), null, "item"));
++            Assert.Null(p.TryStart(Film("/3"), null, "item"));
++            gate.SetResult(0);
++        }
++
++        [Fact]
++        public async Task TryStart_SkippedWhileBusy_CanWarmLater()
++        {
++            var gate = new TaskCompletionSource<long>();
++            var p = new MediaPrewarm(read: (_, _) => gate.Task);
++            var a = p.TryStart(Film("/1"), null, "item");
++            var b = p.TryStart(Film("/2"), null, "item");
++            Assert.Null(p.TryStart(Film("/3"), null, "item"));
++            gate.SetResult(0);
++            await Task.WhenAll(a!, b!);
++            Assert.NotNull(p.TryStart(Film("/3"), null, "item"));
++        }
++
++        [Fact]
++        public void TryStart_NotAVideo_Skipped()
++        {
++            var p = new MediaPrewarm(read: (_, _) => Task.FromResult(0L));
++            Assert.Null(p.TryStart(new Series { Path = "/data/tv/show" }, null, "item"));
++        }
++
++        [Theory]
++        [InlineData(0L, new long[0])]
++        [InlineData(1L, new long[] { 0 })]
++        [InlineData(65536L, new long[] { 0 })]
++        [InlineData(65537L, new long[] { 0, 1 })]
++        [InlineData(200000L, new long[] { 0, 65536, 134464 })]
++        public void BlockOffsets(long length, long[] expected)
++        {
++            Assert.Equal(expected, MediaPrewarm.BlockOffsets(length));
++        }
++
++        [Fact]
++        public async Task ReadBlocksAsync_ReadsStartMiddleEnd()
++        {
++            var path = Path.GetTempFileName();
++            try
++            {
++                await File.WriteAllBytesAsync(path, new byte[(3 * MediaPrewarm.BlockSize) + 10], TestContext.Current.CancellationToken);
++                Assert.Equal(3 * MediaPrewarm.BlockSize, await MediaPrewarm.ReadBlocksAsync(path, CancellationToken.None));
++                await File.WriteAllBytesAsync(path, new byte[10], TestContext.Current.CancellationToken);
++                Assert.Equal(10, await MediaPrewarm.ReadBlocksAsync(path, CancellationToken.None));
++                await File.WriteAllBytesAsync(path, Array.Empty<byte>(), TestContext.Current.CancellationToken);
++                Assert.Equal(0, await MediaPrewarm.ReadBlocksAsync(path, CancellationToken.None));
++            }
++            finally
++            {
++                File.Delete(path);
++            }
++        }
++
++        [Fact]
++        public async Task ReadBlocksAsync_MissingFile_Throws_TryStartSwallows()
++        {
++            await Assert.ThrowsAnyAsync<IOException>(() => MediaPrewarm.ReadBlocksAsync("/nonexistent/x.mkv", CancellationToken.None));
++            var t = MediaPrewarm.Shared.TryStart(Film("/nonexistent/" + Guid.NewGuid() + ".mkv"), null, "item");
++            Assert.NotNull(t);
++            await t!;
++        }
++    }
++}
