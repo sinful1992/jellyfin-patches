@@ -16,6 +16,8 @@ Five upstream fixes, picked in task 189 (team repo task189/server.md, USER Yes #
 
 Checks on v12.4 + 0001-0020 from a clean worktree: `dotnet build Jellyfin.Server -c Release` with analyzers, 0 warnings, 0 errors. Api.Tests 197/197, Controller.Tests 254/254, MediaEncoding.Tests 109/110 (1 skipped upstream), Server.Implementations.Tests 1092/1104 (12 skipped upstream). Every file in 0016-0020 maps to a DLL the base image ships.
 
+Deployed 2026-11-22 11:17 UTC (USER Yes #13647, ada review agree #13642's chain): image `jellyfin-patched:12.4-p3` (manifest 6e2ab5ec6788), build.sh smoke test passed, startup complete in 9.5 s with no errors, all 5 swapped DLLs differ from p2. Rollback: `image: jellyfin-patched:12.4-p2` (4ba6021dc23d) in ~/media/docker-compose.yml, same `up -d --no-deps jellyfin`. No tag, no GHCR push.
+
 Not in p3: upstream #18409 (HLS segments not blocked behind a job restart) waits for a live seek test on a DTS remux. It is on series branch `patched/12.4-p3-hls` with a null-guard for patch 0012 that its tests need.
 
 ## 12.4-p2 — unreleased (task 176)
