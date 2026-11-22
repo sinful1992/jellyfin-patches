@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bond-009 <bond.009@outlook.com>
+Date: Thu, 12 Nov 2026 19:39:59 +0100
+Subject: [PATCH] Keep audio from the preceding keyframe when HLS remuxing with
+ transcoded audio (upstream #18578)
+
+Merge pull request #18578 from gnattu/fix/hls-remux-audio-preroll-upstream
+
+Fix audio gaps when restarting HLS with copied video
+
+(cherry picked from commit 54e4dbb4fe35fa065c38a28fcc8835e50c395e7e)
+---
+ .../MediaEncoding/EncodingHelper.cs           | 10 +++
+ .../MediaEncoding/HlsPrerollTests.cs          | 89 +++++++++++++++++++
+ 2 files changed, 99 insertions(+)
+ create mode 100644 tests/Jellyfin.Controller.Tests/MediaEncoding/HlsPrerollTests.cs
+
+diff --git a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+index a31e69e19e..a30db1b411 100644
+--- a/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
++++ b/MediaBrowser.Controller/MediaEncoding/EncodingHelper.cs
+@@ -3116,6 +3116,16 @@ namespace MediaBrowser.Controller.MediaEncoding
+                 }
+ 
+                 seekParam += string.Format(CultureInfo.InvariantCulture, "-ss {0}", _mediaEncoder.GetTimeParameter(seekTick));
++
++                // Retain audio from the preceding keyframe to match copied video's start time.
++                if (isHlsRemuxing
++                    && state.AudioStream is not null
++                    && !string.IsNullOrEmpty(state.OutputAudioCodec)
++                    && !IsCopyCodec(state.OutputAudioCodec)
++                    && !string.Equals(state.InputContainer, "wtv", StringComparison.OrdinalIgnoreCase))
++                {
++                    seekParam += " -noaccurate_seek";
++                }
+             }
+ 
+             return seekParam;
+diff --git a/tests/Jellyfin.Controller.Tests/MediaEncoding/HlsPrerollTests.cs b/tests/Jellyfin.Controller.Tests/MediaEncoding/HlsPrerollTests.cs
+new file mode 100644
+index 0000000000..10453a29ff
+--- /dev/null
++++ b/tests/Jellyfin.Controller.Tests/MediaEncoding/HlsPrerollTests.cs
+@@ -0,0 +1,89 @@
++using System;
++using System.Globalization;
++using MediaBrowser.Common.Configuration;
++using MediaBrowser.Controller.IO;
++using MediaBrowser.Controller.MediaEncoding;
++using MediaBrowser.Model.Configuration;
++using MediaBrowser.Model.Entities;
++using Microsoft.Extensions.Configuration;
++using Moq;
++using Xunit;
++using IConfigurationManager = MediaBrowser.Common.Configuration.IConfigurationManager;
++
++namespace Jellyfin.Controller.Tests.MediaEncoding;
++
++public class HlsPrerollTests
++{
++    [Theory]
++    [InlineData(TranscodingJobType.Hls, "copy", "aac", "mp4", "mkv", true)]
++    [InlineData(TranscodingJobType.Hls, "copy", "aac", "ts", "mkv", true)]
++    [InlineData(TranscodingJobType.Hls, "copy", "opus", "mp4", "mkv", true)]
++    [InlineData(TranscodingJobType.Hls, "copy", "mp3", "ts", "mkv", true)]
++    [InlineData(TranscodingJobType.Hls, "copy", "copy", "mp4", "mkv", false)]
++    [InlineData(TranscodingJobType.Hls, "libx264", "copy", "mp4", "mkv", false)]
++    [InlineData(TranscodingJobType.Hls, "libx264", "aac", "mp4", "mkv", false)]
++    [InlineData(TranscodingJobType.Progressive, "copy", "aac", "mp4", "mkv", false)]
++    [InlineData(TranscodingJobType.Hls, "copy", "aac", "mp4", "wtv", false)]
++    public void GetFastSeekCommandLineParameter_RetainsAudioPreroll(
++        TranscodingJobType type,
++        string video,
++        string audio,
++        string container,
++        string input,
++        bool retainsPreroll)
++    {
++        var state = CreateState(type);
++        state.OutputVideoCodec = video;
++        state.OutputAudioCodec = audio;
++        state.InputContainer = input;
++        state.BaseRequest.StartTimeTicks = 312_810_000L;
++        var args = CreateHelper().GetFastSeekCommandLineParameter(state, new EncodingOptions(), container);
++        Assert.Equal(retainsPreroll, args.Contains("-noaccurate_seek", StringComparison.Ordinal));
++        Assert.StartsWith(type == TranscodingJobType.Hls && video == "copy" ? "-ss 00:00:31.781" : "-ss 00:00:31.281", args, StringComparison.Ordinal);
++    }
++
++    [Theory]
++    [InlineData(false, "aac", 312_810_000L)]
++    [InlineData(true, "", 312_810_000L)]
++    [InlineData(true, "aac", 0L)]
++    public void GetFastSeekCommandLineParameter_WithoutAudioOrSeek_OmitsNoAccurateSeek(bool hasAudio, string audioCodec, long seekTicks)
++    {
++        var state = CreateState();
++        if (!hasAudio)
++        {
++            state.AudioStream = null;
++        }
++
++        state.OutputAudioCodec = audioCodec;
++        state.BaseRequest.StartTimeTicks = seekTicks;
++        var args = CreateHelper().GetFastSeekCommandLineParameter(state, new EncodingOptions(), "mp4");
++        Assert.DoesNotContain("noaccurate_seek", args, StringComparison.Ordinal);
++    }
++
++    private static EncodingHelper CreateHelper()
++    {
++        var encoder = new Mock<IMediaEncoder>();
++        encoder.Setup(e => e.GetTimeParameter(It.IsAny<long>()))
++            .Returns((long ticks) => TimeSpan.FromTicks(ticks).ToString(@"hh\:mm\:ss\.fff", CultureInfo.InvariantCulture));
++        encoder.SetupGet(e => e.EncoderVersion).Returns(new Version(8, 1, 3));
++        return new EncodingHelper(
++            Mock.Of<IApplicationPaths>(),
++            encoder.Object,
++            Mock.Of<ISubtitleEncoder>(),
++            Mock.Of<IConfiguration>(),
++            Mock.Of<IConfigurationManager>(),
++            Mock.Of<IPathManager>());
++    }
++
++    private static EncodingJobInfo CreateState(TranscodingJobType type = TranscodingJobType.Hls) => new(type)
++    {
++        IsVideoRequest = true,
++        OutputVideoCodec = "copy",
++        OutputAudioCodec = "aac",
++        InputContainer = "mkv",
++        RunTimeTicks = TimeSpan.FromSeconds(45).Ticks,
++        VideoStream = new MediaStream { Codec = "h264", Type = MediaStreamType.Video, NalLengthSize = "4" },
++        AudioStream = new MediaStream { Codec = "flac", Type = MediaStreamType.Audio, Channels = 1 },
++        BaseRequest = new BaseEncodingJobOptions()
++    };
++}

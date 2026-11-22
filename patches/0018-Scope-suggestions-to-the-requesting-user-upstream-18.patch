@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bond-009 <bond.009@outlook.com>
+Date: Thu, 5 Nov 2026 19:32:35 +0100
+Subject: [PATCH] Scope suggestions to the requesting user (upstream #18568)
+
+Merge pull request #18568 from crobibero/fix/suggestions-user-scope
+
+Scope suggestions to the requesting user
+
+(cherry picked from commit c412e7f38473d68c7b74a691b5c6874e8a39f6db)
+---
+ .../Controllers/SuggestionsController.cs      |  14 +-
+ .../Controllers/SuggestionsControllerTests.cs | 129 ++++++++++++++++++
+ 2 files changed, 133 insertions(+), 10 deletions(-)
+ create mode 100644 tests/Jellyfin.Api.Tests/Controllers/SuggestionsControllerTests.cs
+
+diff --git a/Jellyfin.Api/Controllers/SuggestionsController.cs b/Jellyfin.Api/Controllers/SuggestionsController.cs
+index 9c5515dd92..79f2f4b123 100644
+--- a/Jellyfin.Api/Controllers/SuggestionsController.cs
++++ b/Jellyfin.Api/Controllers/SuggestionsController.cs
+@@ -67,16 +67,10 @@ public class SuggestionsController : BaseJellyfinApiController
+         [FromQuery] int? limit,
+         [FromQuery] bool enableTotalRecordCount = false)
+     {
+-        User? user;
+-        if (userId.IsNullOrEmpty())
+-        {
+-            user = null;
+-        }
+-        else
+-        {
+-            var requestUserId = RequestHelpers.GetUserId(User, userId);
+-            user = _userManager.GetUserById(requestUserId);
+-        }
++        var requestUserId = RequestHelpers.GetUserId(User, userId);
++        User? user = requestUserId.IsEmpty()
++            ? null
++            : _userManager.GetUserById(requestUserId);
+ 
+         var dtoOptions = new DtoOptions();
+         var result = _libraryManager.GetItemsResult(new InternalItemsQuery(user)
+diff --git a/tests/Jellyfin.Api.Tests/Controllers/SuggestionsControllerTests.cs b/tests/Jellyfin.Api.Tests/Controllers/SuggestionsControllerTests.cs
+new file mode 100644
+index 0000000000..3ad2153a26
+--- /dev/null
++++ b/tests/Jellyfin.Api.Tests/Controllers/SuggestionsControllerTests.cs
+@@ -0,0 +1,129 @@
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.Security.Claims;
++using Jellyfin.Api.Constants;
++using Jellyfin.Api.Controllers;
++using Jellyfin.Data.Enums;
++using Jellyfin.Database.Implementations.Entities;
++using MediaBrowser.Controller.Dto;
++using MediaBrowser.Controller.Entities;
++using MediaBrowser.Controller.Library;
++using MediaBrowser.Model.Dto;
++using MediaBrowser.Model.Querying;
++using Microsoft.AspNetCore.Http;
++using Microsoft.AspNetCore.Mvc;
++using Moq;
++using Xunit;
++
++namespace Jellyfin.Api.Tests.Controllers;
++
++/// <summary>
++/// GET /Items/Suggestions is scoped to a user even when the caller sends no userId (upstream #18568, task 189).
++/// Before the fix a request without userId ran the query with no user, so library access and parental limits
++/// were not applied.
++/// </summary>
++public class SuggestionsControllerTests
++{
++    private readonly User _caller = new("viewer", "auth", "reset") { Id = Guid.NewGuid() };
++    private readonly User _other = new("other", "auth", "reset") { Id = Guid.NewGuid() };
++    private readonly Mock<ILibraryManager> _library = new();
++    private readonly List<InternalItemsQuery> _queries = new();
++
++    private SuggestionsController CreateSubject(params Claim[] claims)
++    {
++        var users = new Mock<IUserManager>();
++        users.Setup(m => m.GetUserById(_caller.Id)).Returns(_caller);
++        users.Setup(m => m.GetUserById(_other.Id)).Returns(_other);
++        _library.Setup(m => m.GetItemsResult(It.IsAny<InternalItemsQuery>()))
++            .Callback<InternalItemsQuery>(_queries.Add)
++            .Returns(new QueryResult<BaseItem>(0, 0, Array.Empty<BaseItem>()));
++        var dto = new Mock<IDtoService>();
++        dto.Setup(m => m.GetBaseItemDtos(It.IsAny<IReadOnlyList<BaseItem>>(), It.IsAny<DtoOptions>(), It.IsAny<User>(), It.IsAny<BaseItem>()))
++            .Returns(Array.Empty<BaseItemDto>());
++
++        return new SuggestionsController(dto.Object, users.Object, _library.Object)
++        {
++            ControllerContext = new ControllerContext
++            {
++                HttpContext = new DefaultHttpContext { User = new ClaimsPrincipal(new ClaimsIdentity(claims, "test")) }
++            }
++        };
++    }
++
++    private Claim[] UserClaims(bool admin = false)
++    {
++        var claims = new List<Claim>
++        {
++            new(InternalClaimTypes.UserId, _caller.Id.ToString("N", CultureInfo.InvariantCulture)),
++            new(InternalClaimTypes.IsApiKey, bool.FalseString),
++        };
++        if (admin)
++        {
++            claims.Add(new Claim(ClaimTypes.Role, UserRoles.Administrator));
++        }
++
++        return claims.ToArray();
++    }
++
++    [Fact]
++    public void NoUserId_UsesTheCaller()
++    {
++        var subject = CreateSubject(UserClaims());
++
++        subject.GetSuggestions(null, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5);
++
++        Assert.Same(_caller, Assert.Single(_queries).User);
++    }
++
++    [Fact]
++    public void EmptyUserId_UsesTheCaller()
++    {
++        var subject = CreateSubject(UserClaims());
++
++        subject.GetSuggestions(Guid.Empty, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5);
++
++        Assert.Same(_caller, Assert.Single(_queries).User);
++    }
++
++    [Fact]
++    public void OwnUserId_UsesTheCaller()
++    {
++        var subject = CreateSubject(UserClaims());
++
++        subject.GetSuggestions(_caller.Id, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5);
++
++        Assert.Same(_caller, Assert.Single(_queries).User);
++    }
++
++    [Fact]
++    public void OtherUsersId_NonAdmin_IsForbidden()
++    {
++        var subject = CreateSubject(UserClaims());
++
++        Assert.Throws<MediaBrowser.Controller.Net.SecurityException>(() =>
++            subject.GetSuggestions(_other.Id, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5));
++        Assert.Empty(_queries);
++    }
++
++    [Fact]
++    public void OtherUsersId_Admin_UsesThatUser()
++    {
++        var subject = CreateSubject(UserClaims(admin: true));
++
++        subject.GetSuggestions(_other.Id, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5);
++
++        Assert.Same(_other, Assert.Single(_queries).User);
++    }
++
++    [Fact]
++    public void ApiKeyWithoutUser_RunsWithNoUser()
++    {
++        // An API key carries no user; there is nobody to scope to, as before.
++        var subject = CreateSubject(new Claim(InternalClaimTypes.IsApiKey, bool.TrueString));
++
++        subject.GetSuggestions(null, Array.Empty<MediaType>(), Array.Empty<BaseItemKind>(), null, 5);
++
++        Assert.Null(Assert.Single(_queries).User);
++    }
++}

@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bond-009 <bond.009@outlook.com>
+Date: Thu, 12 Nov 2026 19:28:31 +0100
+Subject: [PATCH] Bind batch-wide save lookups as one parameter to stay under
+ SQLite variable limit (upstream #18645)
+
+Merge pull request #18645 from Shadowghost/fix/save-items-sql-variable-limit
+
+Fix "too many SQL variables" when saving large scan batches and playlists
+
+(cherry picked from commit e66161258b926a78be16e0583a3af873fe48305a)
+---
+ .../Item/ItemPersistenceService.cs            | 11 ++--
+ .../Item/ItemPersistenceOwnedRowTests.cs      | 56 +++++++++++++++++++
+ 2 files changed, 62 insertions(+), 5 deletions(-)
+
+diff --git a/Jellyfin.Server.Implementations/Item/ItemPersistenceService.cs b/Jellyfin.Server.Implementations/Item/ItemPersistenceService.cs
+index 3bf33b969e..4e7e5a5331 100644
+--- a/Jellyfin.Server.Implementations/Item/ItemPersistenceService.cs
++++ b/Jellyfin.Server.Implementations/Item/ItemPersistenceService.cs
+@@ -374,7 +374,8 @@ public class ItemPersistenceService : IItemPersistenceService
+         var allListedItemValuesSet = allListedItemValues.ToHashSet();
+ 
+         var existingValues = context.ItemValues
+-            .Where(e => types.Contains(e.Type) && values.Contains(e.Value))
++            .WhereOneOrMany(types, e => e.Type)
++            .WhereOneOrMany(values, e => e.Value)
+             .AsEnumerable()
+             .Where(e => allListedItemValuesSet.Contains((e.Type, e.Value)))
+             .ToArray();
+@@ -428,7 +429,7 @@ public class ItemPersistenceService : IItemPersistenceService
+ 
+         var allExistingAncestorIds = itemsWithAncestors.Count > 0
+             ? context.AncestorIds
+-                .Where(e => itemsWithAncestors.Contains(e.ItemId))
++                .WhereOneOrMany(itemsWithAncestors, e => e.ItemId)
+                 .ToList()
+                 .GroupBy(e => e.ItemId)
+                 .ToDictionary(g => g.Key, g => g.ToList())
+@@ -442,7 +443,7 @@ public class ItemPersistenceService : IItemPersistenceService
+ 
+         var validAncestorIdsSet = allRequestedAncestorIds.Count > 0
+             ? context.BaseItems
+-                .Where(e => allRequestedAncestorIds.Contains(e.Id))
++                .WhereOneOrMany(allRequestedAncestorIds, e => e.Id)
+                 .Select(f => f.Id)
+                 .ToHashSet()
+             : new HashSet<Guid>();
+@@ -502,7 +503,7 @@ public class ItemPersistenceService : IItemPersistenceService
+         {
+             var allParentIds = folderIds.Concat(videoIds).Distinct().ToList();
+             var allLinkedChildren = context.LinkedChildren
+-                .Where(e => allParentIds.Contains(e.ParentId))
++                .WhereOneOrMany(allParentIds, e => e.ParentId)
+                 .ToList();
+ 
+             allLinkedChildrenByParent = allLinkedChildren
+@@ -572,7 +573,7 @@ public class ItemPersistenceService : IItemPersistenceService
+ 
+                 var pathToIdMap = pathsToResolve.Count > 0
+                     ? context.BaseItems
+-                        .Where(e => e.Path != null && pathsToResolve.Contains(e.Path))
++                        .WhereOneOrMany(pathsToResolve, e => e.Path!)
+                         .Select(e => new { e.Path, e.Id })
+                         .GroupBy(e => e.Path!)
+                         .ToDictionary(g => g.Key, g => g.First().Id)
+diff --git a/tests/Jellyfin.Server.Implementations.Tests/Item/ItemPersistenceOwnedRowTests.cs b/tests/Jellyfin.Server.Implementations.Tests/Item/ItemPersistenceOwnedRowTests.cs
+index fea6ccb7a1..d2eb53c393 100644
+--- a/tests/Jellyfin.Server.Implementations.Tests/Item/ItemPersistenceOwnedRowTests.cs
++++ b/tests/Jellyfin.Server.Implementations.Tests/Item/ItemPersistenceOwnedRowTests.cs
+@@ -12,6 +12,7 @@ using MediaBrowser.Controller.Entities;
+ using MediaBrowser.Controller.Entities.Movies;
+ using MediaBrowser.Controller.Library;
+ using MediaBrowser.Controller.LiveTv;
++using MediaBrowser.Controller.Playlists;
+ using MediaBrowser.Model.Configuration;
+ using MediaBrowser.Model.Entities;
+ using Microsoft.Extensions.Logging.Abstractions;
+@@ -113,6 +114,61 @@ public sealed class ItemPersistenceOwnedRowTests : SqliteDbTestFixture
+         Assert.Equal("777", Assert.Single(ctx.BaseItemProviders.Where(e => e.ItemId.Equals(fresh))).ProviderValue);
+     }
+ 
++    [Fact]
++    public void SaveItems_BatchLargerThanSqliteVariableLimit_Saves()
++    {
++        // SQLite caps bound variables at 32766; batch-wide lookups must not bind one per item.
++        const int Count = 33_000;
++        var movies = Enumerable.Range(0, Count)
++            .Select(i =>
++            {
++                var movie = CreateMovie(Guid.NewGuid());
++                movie.Genres = [$"Genre {i}"];
++                return movie;
++            })
++            .ToList();
++
++        _service.SaveItems(movies, CancellationToken.None);
++        _service.SaveItems(movies, CancellationToken.None);
++
++        using var ctx = CreateDbContext();
++        Assert.Equal(Count, ctx.BaseItems.Count(e => e.Type == "MediaBrowser.Controller.Entities.Movies.Movie"));
++        Assert.Equal(Count, ctx.ItemValuesMap.Count());
++    }
++
++    [Fact]
++    public void SaveItems_PlaylistLinkedByPathBeyondSqliteVariableLimit_Saves()
++    {
++        var appHost = new Mock<IServerApplicationHost>();
++        appHost.Setup(h => h.ReverseVirtualPath(It.IsAny<string>())).Returns((string p) => p);
++        var service = new ItemPersistenceService(CreateDbContextFactory(), appHost.Object, NullLogger<ItemPersistenceService>.Instance);
++
++        const int Count = 33_000;
++        var movies = Enumerable.Range(0, Count)
++            .Select(i =>
++            {
++                var movie = CreateMovie(Guid.NewGuid());
++                movie.Path = $"/movies/{i}.mkv";
++                return movie;
++            })
++            .ToList();
++        service.SaveItems(movies, CancellationToken.None);
++
++        // Legacy links carry only a path, so the save resolves every one of them in a single lookup.
++#pragma warning disable CS0618 // Type or member is obsolete
++        var playlist = new Playlist
++        {
++            Id = Guid.NewGuid(),
++            Name = "Everything",
++            LinkedChildren = movies.Select(m => new LinkedChild { Path = m.Path, Type = MediaBrowser.Controller.Entities.LinkedChildType.Manual }).ToArray()
++        };
++#pragma warning restore CS0618
++        service.SaveItems([playlist], CancellationToken.None);
++
++        using var ctx = CreateDbContext();
++        Assert.Equal(Count, ctx.LinkedChildren.Count(e => e.ParentId.Equals(playlist.Id)));
++    }
++
+     [Fact]
+     public async Task ReattachUserData_DetachedRowsFromDifferentEras_CollapsesToMostRecentPlay()
+     {
